@@ -234,17 +234,18 @@ func (c *Client) UpdatePRBase(number int, base string) error {
 	return c.rest.Patch(path, bytes.NewReader(body), nil)
 }
 
-// UpdatePRTitle updates the title of an existing pull request.
-func (c *Client) UpdatePRTitle(number int, title string) error {
+// UpdatePRMetadata updates the title and body of an existing pull request.
+func (c *Client) UpdatePRMetadata(number int, title, body string) error {
 	type updatePRRequest struct {
 		Title string `json:"title"`
+		Body  string `json:"body"`
 	}
-	body, err := json.Marshal(updatePRRequest{Title: title})
+	payload, err := json.Marshal(updatePRRequest{Title: title, Body: body})
 	if err != nil {
 		return fmt.Errorf("marshaling request: %w", err)
 	}
 	path := fmt.Sprintf("repos/%s/%s/pulls/%d", c.owner, c.repo, number)
-	return c.rest.Patch(path, bytes.NewReader(body), nil)
+	return c.rest.Patch(path, bytes.NewReader(payload), nil)
 }
 
 func (c *Client) ReopenPR(number int) error {

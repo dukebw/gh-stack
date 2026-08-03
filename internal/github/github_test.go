@@ -2,12 +2,24 @@ package github
 
 import (
 	"encoding/json"
+	"net/http"
 	"testing"
 
 	graphql "github.com/cli/shurcooL-graphql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestUpdatePRMetadata(t *testing.T) {
+	var request recordedRequest
+	client := testAsyncClient(t, http.StatusOK, `{}`, &request)
+
+	require.NoError(t, client.UpdatePRMetadata(42, "Exact title", ""))
+
+	assert.Equal(t, http.MethodPatch, request.method)
+	assert.Equal(t, "/repos/o/r/pulls/42", request.path)
+	assert.JSONEq(t, `{"title":"Exact title","body":""}`, request.body)
+}
 
 func TestPRURL(t *testing.T) {
 	tests := []struct {

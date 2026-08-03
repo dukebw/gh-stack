@@ -470,9 +470,10 @@ branch names must have the form `<login>/stack/<32-lowercase-hex>`.
 Reconciliation uses atomic force-with-lease pushes, creates or reopens PRs,
 repairs base relationships, and creates or safely replaces the native Stack.
 Missing managed layers are closed and deleted, while missing foreign branches
-or queued structural changes block the operation before mutation. Existing PR
-titles, bodies, and draft states are preserved. New PRs are created as drafts
-and published only after the Stack is complete.
+or queued structural changes block the operation before mutation. Managed PR
+titles and bodies are synchronized from the manifest on every reconciliation;
+existing draft states are preserved. New PRs are created as drafts and
+published only after the Stack is complete.
 
 `--dry-run` returns the same create, update, reorder, remove, merged, and
 blocked plan without changing Git or GitHub. `--json` reserves stdout for the

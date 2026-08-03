@@ -161,11 +161,12 @@ func (s *reconcileTestState) client() *github.MockClient {
 			}
 			return nil
 		},
-		UpdatePRTitleFn: func(number int, title string) error {
-			s.calls = append(s.calls, fmt.Sprintf("update_title:%d:%s", number, title))
+		UpdatePRMetadataFn: func(number int, title, body string) error {
+			s.calls = append(s.calls, fmt.Sprintf("update_metadata:%d:%s:%s", number, title, body))
 			for _, pr := range s.prs {
 				if pr.Number == number {
 					pr.Title = title
+					pr.Body = body
 				}
 			}
 			return nil
@@ -307,8 +308,9 @@ func TestApplyReconcileInitialCreateAndIdempotentRerun(t *testing.T) {
 	assert.Contains(t, state.calls, "create_pr:"+branches[0])
 	assert.Contains(t, state.calls, "create_pr:"+branches[1])
 	assert.Contains(t, state.calls, "ready:PR_101")
-	assert.Contains(t, state.calls, "update_title:101:Layer 1")
+	assert.Contains(t, state.calls, "update_metadata:101:Layer 1:Body 1")
 	assert.NotContains(t, state.calls, "ready:PR_102")
+	assert.NotContains(t, state.calls, "update_metadata:102:")
 	assert.Contains(t, state.calls, "create_stack:[101 102]")
 	require.NotNil(t, plan.result.Stack)
 	assert.Equal(t, "open", plan.result.Layers[0].Status)
@@ -323,6 +325,23 @@ func TestApplyReconcileInitialCreateAndIdempotentRerun(t *testing.T) {
 	assert.NotContains(t, strings.Join(state.calls, "\n"), "create_stack")
 	assert.NotContains(t, strings.Join(state.calls, "\n"), "add_stack")
 	assert.NotContains(t, strings.Join(state.calls, "\n"), "ready:")
+	assert.NotContains(t, strings.Join(state.calls, "\n"), "update_metadata:")
+}
+
+func TestPlanReconcileReportsMetadataUpdate(t *testing.T) {
+	state := newReconcileTestState()
+	manifest := testManifest(managedBranch("a"))
+	pr := state.addPR(manifest.Layers[0].Branch, "master", "OPEN")
+	pr.Title = manifest.Layers[0].Title
+	pr.Body = "Outdated body"
+	mockReconcileGit(t, nil, &state.calls)
+
+	plan, err := planReconcile(manifest, true, state.client())
+
+	require.NoError(t, err)
+	assert.Equal(t, "update", plan.result.Layers[0].Action)
+	assert.Contains(t, actionTypes(plan.result.Actions), "update")
+	assert.Empty(t, state.calls)
 }
 
 func TestApplyReconcileResumesInterruptedReadyPublication(t *testing.T) {
@@ -338,17 +357,19 @@ func TestApplyReconcileResumesInterruptedReadyPublication(t *testing.T) {
 	require.NoError(t, applyReconcile(plan, state.client()))
 
 	assert.Contains(t, state.calls, "ready:"+pr.ID)
-	assert.Contains(t, state.calls, fmt.Sprintf("update_title:%d:Layer 1", pr.Number))
+	assert.Contains(t, state.calls, fmt.Sprintf("update_metadata:%d:Layer 1:Body 1", pr.Number))
 	assert.False(t, pr.IsDraft)
 	assert.Equal(t, "Layer 1", pr.Title)
+	assert.Equal(t, "Body 1", pr.Body)
 }
 
-func TestApplyReconcilePreservesExistingManualDraft(t *testing.T) {
+func TestApplyReconcilePreservesExistingDraftStateWhileSyncingMetadata(t *testing.T) {
 	state := newReconcileTestState()
 	branch := managedBranch("a")
 	pr := state.addPR(branch, "master", "OPEN")
 	pr.IsDraft = true
 	pr.Title = "User-managed title"
+	pr.Body = "User-managed body"
 	mockReconcileGit(t, map[string]string{branch: pr.HeadRefOID}, &state.calls)
 
 	plan, err := planReconcile(testManifest(branch), false, state.client())
@@ -356,9 +377,10 @@ func TestApplyReconcilePreservesExistingManualDraft(t *testing.T) {
 	require.NoError(t, applyReconcile(plan, state.client()))
 
 	assert.NotContains(t, strings.Join(state.calls, "\n"), "ready:")
-	assert.NotContains(t, strings.Join(state.calls, "\n"), "update_title:")
+	assert.Contains(t, state.calls, fmt.Sprintf("update_metadata:%d:Layer 1:Body 1", pr.Number))
 	assert.True(t, pr.IsDraft)
-	assert.Equal(t, "User-managed title", pr.Title)
+	assert.Equal(t, "Layer 1", pr.Title)
+	assert.Equal(t, "Body 1", pr.Body)
 }
 
 func TestApplyReconcileReopensClosedDesiredPR(t *testing.T) {

@@ -425,7 +425,8 @@ func (p *reconcilePlan) buildResult(targetPRs []*github.PullRequest) {
 			if p.structural {
 				action = "reorder"
 			} else if !targetNumbers[layer.pr.Number] || layer.pr.BaseRefName != expectedActiveBase(p.layers, i, p.manifest.Base) ||
-				(layer.localSHA != "" && layer.pr.HeadRefOID != "" && layer.localSHA != layer.pr.HeadRefOID) {
+				(layer.localSHA != "" && layer.pr.HeadRefOID != "" && layer.localSHA != layer.pr.HeadRefOID) ||
+				layer.pr.Title != layer.manifest.Title || layer.pr.Body != layer.manifest.Body {
 				action = "update"
 			}
 		}
@@ -587,6 +588,7 @@ func applyReconcile(plan *reconcilePlan, client github.ClientOps) error {
 			}
 			pr.State = "OPEN"
 			pr.Title = title
+			pr.Body = layer.manifest.Body
 			pr.HeadRefName = layer.manifest.Branch
 			pr.HeadRefOID = layer.localSHA
 			pr.BaseRefName = base
@@ -632,19 +634,20 @@ func applyReconcile(plan *reconcilePlan, client github.ClientOps) error {
 
 	for _, layer := range active {
 		pendingTitle := reconcilePendingTitlePrefix + layer.manifest.Title
-		if layer.pr.Title != pendingTitle {
-			continue
-		}
-		if !layer.manifest.Draft && layer.pr.IsDraft {
+		if layer.pr.Title == pendingTitle && !layer.manifest.Draft && layer.pr.IsDraft {
 			if err := client.MarkPRReadyForReview(layer.pr.ID); err != nil {
 				return failReconcile(plan, ErrAPIFailure, "api_error", fmt.Sprintf("failed to mark PR #%d ready for review: %v", layer.pr.Number, err), layer.manifest.Branch, layer.pr.Number)
 			}
 			layer.pr.IsDraft = false
 		}
-		if err := client.UpdatePRTitle(layer.pr.Number, layer.manifest.Title); err != nil {
-			return failReconcile(plan, ErrAPIFailure, "api_error", fmt.Sprintf("failed to finalize title of PR #%d: %v", layer.pr.Number, err), layer.manifest.Branch, layer.pr.Number)
+		if layer.pr.Title == layer.manifest.Title && layer.pr.Body == layer.manifest.Body {
+			continue
+		}
+		if err := client.UpdatePRMetadata(layer.pr.Number, layer.manifest.Title, layer.manifest.Body); err != nil {
+			return failReconcile(plan, ErrAPIFailure, "api_error", fmt.Sprintf("failed to synchronize metadata of PR #%d: %v", layer.pr.Number, err), layer.manifest.Branch, layer.pr.Number)
 		}
 		layer.pr.Title = layer.manifest.Title
+		layer.pr.Body = layer.manifest.Body
 	}
 	return nil
 }

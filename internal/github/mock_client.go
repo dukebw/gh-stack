@@ -10,7 +10,7 @@ type MockClient struct {
 	FindPRDetailsForBranchFn   func(string) (*PRDetails, error)
 	CreatePRFn                 func(string, string, string, string, bool) (*PullRequest, error)
 	UpdatePRBaseFn             func(int, string) error
-	UpdatePRTitleFn            func(int, string) error
+	UpdatePRMetadataFn         func(int, string, string) error
 	ReopenPRFn                 func(int) error
 	ClosePRFn                  func(int) error
 	MarkPRReadyForReviewFn     func(string) error
@@ -73,9 +73,9 @@ func (m *MockClient) UpdatePRBase(number int, base string) error {
 	return nil
 }
 
-func (m *MockClient) UpdatePRTitle(number int, title string) error {
-	if m.UpdatePRTitleFn != nil {
-		return m.UpdatePRTitleFn(number, title)
+func (m *MockClient) UpdatePRMetadata(number int, title, body string) error {
+	if m.UpdatePRMetadataFn != nil {
+		return m.UpdatePRMetadataFn(number, title, body)
 	}
 	return nil
 }
