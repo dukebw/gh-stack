@@ -424,7 +424,7 @@ func (p *reconcilePlan) buildResult(targetPRs []*github.PullRequest) {
 		if action == "none" && layer.pr != nil && !isMergedPR(layer.pr) && !layer.pr.IsQueued() {
 			if p.structural {
 				action = "reorder"
-			} else if !targetNumbers[layer.pr.Number] || layer.pr.BaseRefName != expectedActiveBase(p.layers, i, p.manifest.Base) ||
+			} else if (p.target != nil && !targetNumbers[layer.pr.Number]) || layer.pr.BaseRefName != expectedActiveBase(p.layers, i, p.manifest.Base) ||
 				(layer.localSHA != "" && layer.pr.HeadRefOID != "" && layer.localSHA != layer.pr.HeadRefOID) ||
 				layer.pr.Title != layer.manifest.Title || layer.pr.Body != layer.manifest.Body {
 				action = "update"

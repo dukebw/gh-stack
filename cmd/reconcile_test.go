@@ -344,6 +344,23 @@ func TestPlanReconcileReportsMetadataUpdate(t *testing.T) {
 	assert.Empty(t, state.calls)
 }
 
+func TestPlanReconcileReportsExactStandaloneLayerAsNoop(t *testing.T) {
+	state := newReconcileTestState()
+	manifest := testManifest(managedBranch("a"))
+	pr := state.addPR(manifest.Layers[0].Branch, "master", "OPEN")
+	pr.Title = manifest.Layers[0].Title
+	pr.Body = manifest.Layers[0].Body
+	mockReconcileGit(t, map[string]string{pr.HeadRefName: pr.HeadRefOID}, &state.calls)
+
+	plan, err := planReconcile(manifest, false, state.client())
+
+	require.NoError(t, err)
+	assert.Nil(t, plan.target)
+	assert.Equal(t, "none", plan.result.Layers[0].Action)
+	assert.Empty(t, plan.result.Actions)
+	assert.Empty(t, state.calls)
+}
+
 func TestApplyReconcileResumesInterruptedReadyPublication(t *testing.T) {
 	state := newReconcileTestState()
 	branch := managedBranch("a")
