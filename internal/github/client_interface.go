@@ -5,10 +5,14 @@ package github
 // Tests can substitute a MockClient.
 type ClientOps interface {
 	FindPRForBranch(branch string) (*PullRequest, error)
+	FindPRForBranchAllStates(branch string) (*PullRequest, error)
 	FindPRByNumber(number int) (*PullRequest, error)
 	FindPRDetailsForBranch(branch string) (*PRDetails, error)
 	CreatePR(base, head, title, body string, draft bool) (*PullRequest, error)
 	UpdatePRBase(number int, base string) error
+	UpdatePRTitle(number int, title string) error
+	ReopenPR(number int) error
+	ClosePR(number int) error
 	MarkPRReadyForReview(prID string) error
 	DisableAutoMerge(prID string) error
 	ListStacks() ([]RemoteStack, error)

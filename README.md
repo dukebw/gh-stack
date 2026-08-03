@@ -7,10 +7,14 @@ Stacked PRs break large changes into a chain of small, reviewable pull requests 
 ## Installation
 
 ```sh
-gh extension install github/gh-stack
+gh extension remove stack
+gh extension install dukebw/gh-stack
 ```
 
-Requires the [GitHub CLI](https://cli.github.com/) (`gh`) v2.0+.
+Skip the removal command when no `stack` extension is installed. This fork
+tracks `github/gh-stack` and adds the manifest reconciliation protocol used by
+`dukebw/stack-pr`. It requires the [GitHub CLI](https://cli.github.com/) (`gh`)
+v2.0+.
 
 ## AI agent integration
 
@@ -434,6 +438,47 @@ gh stack link 42 43 feature-auth feature-ui
 # Use a different base branch and mark PRs as ready for review
 gh stack link --base develop --open feat-a feat-b feat-c
 ```
+
+### `gh stack reconcile`
+
+Reconcile branches managed by an external commit-oriented tool with native
+GitHub stacks through a versioned JSON protocol.
+
+```sh
+gh stack reconcile --input <path|-> [--json] [--dry-run]
+```
+
+The version 1 manifest lists the desired branches from bottom to top. Managed
+branch names must have the form `<login>/stack/<32-lowercase-hex>`.
+
+```json
+{
+  "version": 1,
+  "base": "main",
+  "remote": "origin",
+  "layers": [
+    {
+      "branch": "octocat/stack/0123456789abcdef0123456789abcdef",
+      "title": "Add authentication",
+      "body": "PR description",
+      "draft": false
+    }
+  ]
+}
+```
+
+Reconciliation uses atomic force-with-lease pushes, creates or reopens PRs,
+repairs base relationships, and creates or safely replaces the native Stack.
+Missing managed layers are closed and deleted, while missing foreign branches
+or queued structural changes block the operation before mutation. Existing PR
+titles, bodies, and draft states are preserved. New PRs are created as drafts
+and published only after the Stack is complete.
+
+`--dry-run` returns the same create, update, reorder, remove, merged, and
+blocked plan without changing Git or GitHub. `--json` reserves stdout for the
+versioned result so external tools can consume it reliably. An empty manifest
+is always a no-op. External clients can verify compatibility with
+`gh stack reconcile --protocol-version`.
 
 ### `gh stack merge`
 

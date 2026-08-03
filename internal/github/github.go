@@ -33,6 +33,7 @@ type PullRequest struct {
 	Title            string            `graphql:"title"`
 	Body             string            `graphql:"body"`
 	HeadRefName      string            `graphql:"headRefName"`
+	HeadRefOID       string            `graphql:"headRefOid"`
 	BaseRefName      string            `graphql:"baseRefName"`
 	IsDraft          bool              `graphql:"isDraft"`
 	Merged           bool              `graphql:"merged"`
@@ -144,6 +145,31 @@ func (c *Client) FindPRForBranch(branch string) (*PullRequest, error) {
 	}, nil
 }
 
+// FindPRForBranchAllStates finds the most recently created PR for a branch,
+// including closed and merged PRs.
+func (c *Client) FindPRForBranchAllStates(branch string) (*PullRequest, error) {
+	var query struct {
+		Repository struct {
+			PullRequests struct {
+				Nodes []PullRequest
+			} `graphql:"pullRequests(headRefName: $head, states: [OPEN, CLOSED, MERGED], first: 1, orderBy: {field: CREATED_AT, direction: DESC})"`
+		} `graphql:"repository(owner: $owner, name: $name)"`
+	}
+
+	variables := map[string]interface{}{
+		"owner": graphql.String(c.owner),
+		"name":  graphql.String(c.repo),
+		"head":  graphql.String(branch),
+	}
+	if err := c.gql.Query("FindPRForBranchAllStates", &query, variables); err != nil {
+		return nil, fmt.Errorf("querying PRs: %w", err)
+	}
+	if len(query.Repository.PullRequests.Nodes) == 0 {
+		return nil, nil
+	}
+	return &query.Repository.PullRequests.Nodes[0], nil
+}
+
 // CreatePR creates a new pull request.
 func (c *Client) CreatePR(base, head, title, body string, draft bool) (*PullRequest, error) {
 	var mutation struct {
@@ -204,6 +230,39 @@ func (c *Client) UpdatePRBase(number int, base string) error {
 		return fmt.Errorf("marshaling request: %w", err)
 	}
 
+	path := fmt.Sprintf("repos/%s/%s/pulls/%d", c.owner, c.repo, number)
+	return c.rest.Patch(path, bytes.NewReader(body), nil)
+}
+
+// UpdatePRTitle updates the title of an existing pull request.
+func (c *Client) UpdatePRTitle(number int, title string) error {
+	type updatePRRequest struct {
+		Title string `json:"title"`
+	}
+	body, err := json.Marshal(updatePRRequest{Title: title})
+	if err != nil {
+		return fmt.Errorf("marshaling request: %w", err)
+	}
+	path := fmt.Sprintf("repos/%s/%s/pulls/%d", c.owner, c.repo, number)
+	return c.rest.Patch(path, bytes.NewReader(body), nil)
+}
+
+func (c *Client) ReopenPR(number int) error {
+	return c.updatePRState(number, "open")
+}
+
+func (c *Client) ClosePR(number int) error {
+	return c.updatePRState(number, "closed")
+}
+
+func (c *Client) updatePRState(number int, state string) error {
+	type updatePRRequest struct {
+		State string `json:"state"`
+	}
+	body, err := json.Marshal(updatePRRequest{State: state})
+	if err != nil {
+		return fmt.Errorf("marshaling request: %w", err)
+	}
 	path := fmt.Sprintf("repos/%s/%s/pulls/%d", c.owner, c.repo, number)
 	return c.rest.Patch(path, bytes.NewReader(body), nil)
 }
@@ -354,6 +413,7 @@ func (c *Client) FindPRByNumber(number int) (*PullRequest, error) {
 				Title            string            `graphql:"title"`
 				Body             string            `graphql:"body"`
 				HeadRefName      string            `graphql:"headRefName"`
+				HeadRefOID       string            `graphql:"headRefOid"`
 				BaseRefName      string            `graphql:"baseRefName"`
 				IsDraft          bool              `graphql:"isDraft"`
 				Merged           bool              `graphql:"merged"`
@@ -385,6 +445,7 @@ func (c *Client) FindPRByNumber(number int) (*PullRequest, error) {
 		Title:            n.Title,
 		Body:             n.Body,
 		HeadRefName:      n.HeadRefName,
+		HeadRefOID:       n.HeadRefOID,
 		BaseRefName:      n.BaseRefName,
 		IsDraft:          n.IsDraft,
 		Merged:           n.Merged,

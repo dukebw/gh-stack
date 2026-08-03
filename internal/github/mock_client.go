@@ -5,10 +5,14 @@ package github
 // ClientOps method call. When nil, a reasonable default is returned.
 type MockClient struct {
 	FindPRForBranchFn          func(string) (*PullRequest, error)
+	FindPRForBranchAllStatesFn func(string) (*PullRequest, error)
 	FindPRByNumberFn           func(int) (*PullRequest, error)
 	FindPRDetailsForBranchFn   func(string) (*PRDetails, error)
 	CreatePRFn                 func(string, string, string, string, bool) (*PullRequest, error)
 	UpdatePRBaseFn             func(int, string) error
+	UpdatePRTitleFn            func(int, string) error
+	ReopenPRFn                 func(int) error
+	ClosePRFn                  func(int) error
 	MarkPRReadyForReviewFn     func(string) error
 	DisableAutoMergeFn         func(string) error
 	ListStacksFn               func() ([]RemoteStack, error)
@@ -32,6 +36,13 @@ func (m *MockClient) FindPRForBranch(branch string) (*PullRequest, error) {
 		return m.FindPRForBranchFn(branch)
 	}
 	return nil, nil
+}
+
+func (m *MockClient) FindPRForBranchAllStates(branch string) (*PullRequest, error) {
+	if m.FindPRForBranchAllStatesFn != nil {
+		return m.FindPRForBranchAllStatesFn(branch)
+	}
+	return m.FindPRForBranch(branch)
 }
 
 func (m *MockClient) FindPRByNumber(number int) (*PullRequest, error) {
@@ -58,6 +69,27 @@ func (m *MockClient) CreatePR(base, head, title, body string, draft bool) (*Pull
 func (m *MockClient) UpdatePRBase(number int, base string) error {
 	if m.UpdatePRBaseFn != nil {
 		return m.UpdatePRBaseFn(number, base)
+	}
+	return nil
+}
+
+func (m *MockClient) UpdatePRTitle(number int, title string) error {
+	if m.UpdatePRTitleFn != nil {
+		return m.UpdatePRTitleFn(number, title)
+	}
+	return nil
+}
+
+func (m *MockClient) ReopenPR(number int) error {
+	if m.ReopenPRFn != nil {
+		return m.ReopenPRFn(number)
+	}
+	return nil
+}
+
+func (m *MockClient) ClosePR(number int) error {
+	if m.ClosePRFn != nil {
+		return m.ClosePRFn(number)
 	}
 	return nil
 }
