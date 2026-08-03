@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Tag to build and publish
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -16,10 +22,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - id: version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
       - uses: cli/gh-extension-precompile@v2
         with:
           generate_attestations: true
           go_version_file: go.mod
+          release_tag: ${{ inputs.release_tag || github.ref_name }}
           go_build_options: >-
             -ldflags=-X=github.com/github/gh-stack/cmd.Version=${{ steps.version.outputs.version }}
