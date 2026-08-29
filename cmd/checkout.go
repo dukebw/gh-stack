@@ -41,13 +41,16 @@ GitHub API to discover the stack, fetches the branches, and sets up
 the stack locally. If the stack already exists locally and matches,
 it simply switches to the branch.
 
-When a branch name is provided, the command resolves it against
-locally tracked stacks only.
+When a branch name is provided, the command first checks locally tracked
+stacks. If the branch is not tracked locally, it looks for the branch on
+remote stacks and pulls down the matching stack.
 
-When run without arguments, opens an interactive picker listing every
-stack available to you — both the stacks tracked locally and the stacks
-that exist only on GitHub — so you can search, filter, and check one out.
-Fully merged stacks are omitted.`,
+When run without arguments, first checks whether the current branch belongs
+to a stack on remote that is not tracked locally, and offers to check
+it out. Otherwise, it opens an interactive picker listing every stack available
+to you — both the stacks tracked locally and the stacks that exist only on
+GitHub — so you can search, filter, and check one out. Fully merged stacks are
+omitted.`,
 		Example: `  # Check out a stack by its stack number
   $ gh stack checkout 7
 
@@ -77,7 +80,7 @@ Fully merged stacks are omitted.`,
 // runCheckout resolves a stack and checks out the target branch.
 // For numeric targets, it tries local lookup first, then falls back to
 // the GitHub API to discover remote stacks, then tries as a branch name.
-// Non-numeric targets use local resolution only.
+// Branch names resolve locally first and then against stacks on GitHub.
 func runCheckout(cfg *config.Config, opts *checkoutOptions) error {
 	gitDir, err := git.GitDir()
 	if err != nil {
@@ -123,14 +126,23 @@ func runCheckout(cfg *config.Config, opts *checkoutOptions) error {
 			return err
 		}
 	} else {
-		// Non-numeric target — resolve against local stacks only
+		// Non-numeric target — resolve locally before checking GitHub.
 		var br *stack.BranchRef
 		s, br, err = resolvePR(cfg, sf, opts.target)
-		if err != nil {
-			cfg.Errorf("%s", err)
-			return ErrNotInStack
+		if err == nil {
+			targetBranch = br.Branch
+		} else {
+			s, targetBranch, err = checkoutRemoteStackByBranch(cfg, sf, gitDir, opts.target)
+			if errors.Is(err, errRemoteBranchNotFound) {
+				cfg.Errorf("no local or remote stack found for %q", opts.target)
+				cfg.Printf("Try a stack or PR number with `%s`",
+					cfg.ColorCyan("gh stack checkout <number>"))
+				return ErrNotInStack
+			}
+			if err != nil {
+				return err
+			}
 		}
-		targetBranch = br.Branch
 	}
 
 	currentBranch, _ := git.CurrentBranch()
@@ -186,7 +198,7 @@ func resolveNumericTarget(cfg *config.Config, sf *stack.StackFile, gitDir string
 	// attempt — the user might have a numeric branch name.
 	remoteErr := err
 
-	// 4. Fall back to branch name lookup (handles numeric branch names).
+	// 4. Fall back to local branch name lookup (handles numeric branch names).
 	stacks := sf.FindAllStacksForBranch(raw)
 	if len(stacks) > 0 {
 		s := stacks[0]
@@ -200,9 +212,75 @@ func resolveNumericTarget(cfg *config.Config, sf *stack.StackFile, gitDir string
 		}
 	}
 
+	// Only a definitive "not in a stack" result can be reinterpreted as a
+	// remote branch name. Preserve API, conflict, and other actionable errors.
+	if !errors.Is(remoteErr, ErrNotInStack) {
+		return nil, "", remoteErr
+	}
+
+	// Finally, try the numeric input as a branch in a stack on GitHub.
+	s, targetBranch, err = checkoutRemoteStackByBranch(cfg, sf, gitDir, raw)
+	if err == nil {
+		return s, targetBranch, nil
+	}
+	if !errors.Is(err, errRemoteBranchNotFound) {
+		return nil, "", err
+	}
+
 	// Nothing worked — return the remote error which has the most
 	// informative message for a numeric input
+	cfg.Errorf("PR #%d is not part of a stack on GitHub", number)
 	return nil, "", remoteErr
+}
+
+var errRemoteBranchNotFound = errors.New("remote branch not found in a stack")
+
+// checkoutRemoteStackByBranch finds the unique active stack on GitHub that
+// contains branch, then imports it through the existing PR checkout path.
+func checkoutRemoteStackByBranch(cfg *config.Config, sf *stack.StackFile, gitDir, branch string) (*stack.Stack, string, error) {
+	client, err := cfg.GitHubClient()
+	if err != nil {
+		cfg.Errorf("failed to create GitHub client: %s", err)
+		return nil, "", ErrAPIFailure
+	}
+
+	remoteStacks, err := client.ListStacks()
+	if err != nil {
+		var httpErr *api.HTTPError
+		if errors.As(err, &httpErr) && httpErr.StatusCode == 404 {
+			warnStacksUnavailable(cfg)
+			return nil, "", ErrStacksUnavailable
+		}
+		cfg.Errorf("failed to list stacks: %v", err)
+		return nil, "", ErrAPIFailure
+	}
+
+	matches := matchingRemoteStacksForBranch(remoteStacks, branch)
+	if len(matches) == 0 {
+		return nil, "", errRemoteBranchNotFound
+	}
+	if len(matches) > 1 {
+		stackNumbers := make([]string, len(matches))
+		for i, match := range matches {
+			stackNumbers[i] = strconv.Itoa(match.Number)
+		}
+		cfg.Errorf("branch %q belongs to multiple stacks on GitHub (%s)",
+			branch, strings.Join(stackNumbers, ", "))
+		cfg.Printf("Use `%s` with a stack or PR number to choose one",
+			cfg.ColorCyan("gh stack checkout <number>"))
+		return nil, "", ErrDisambiguate
+	}
+
+	for _, pr := range matches[0].PRDetails {
+		if pr.Head.Ref == branch && pr.Number > 0 {
+			s, targetBranch, err := checkoutRemoteStack(cfg, sf, gitDir, pr.Number)
+			if errors.Is(err, ErrNotInStack) {
+				cfg.Errorf("PR #%d is not part of a stack on GitHub", pr.Number)
+			}
+			return s, targetBranch, err
+		}
+	}
+	return nil, "", errRemoteBranchNotFound
 }
 
 // checkoutRemoteStack discovers a stack from GitHub for the given PR number,
@@ -222,13 +300,12 @@ func checkoutRemoteStack(cfg *config.Config, sf *stack.StackFile, gitDir string,
 		var httpErr *api.HTTPError
 		if errors.As(err, &httpErr) && httpErr.StatusCode == 404 {
 			warnStacksUnavailable(cfg)
-			return nil, "", ErrAPIFailure
+			return nil, "", ErrStacksUnavailable
 		}
 		cfg.Errorf("failed to list stacks: %v", err)
 		return nil, "", ErrAPIFailure
 	}
 	if remoteStack == nil {
-		cfg.Errorf("PR #%d is not part of a stack on GitHub", prNumber)
 		return nil, "", ErrNotInStack
 	}
 
@@ -643,7 +720,22 @@ func interactiveCheckout(cfg *config.Config, sf *stack.StackFile, gitDir string)
 		return nil, "", fmt.Errorf("no target specified; provide a branch name or PR number, or run interactively to select a stack")
 	}
 
-	rows := gatherCheckoutRows(cfg, sf)
+	rows, remoteStacks := gatherCheckoutRows(cfg, sf)
+	if currentBranch, branchErr := git.CurrentBranch(); branchErr == nil {
+		stackNumber, confirmed, confirmErr := offerRemoteStackForBranch(cfg, sf, remoteStacks, currentBranch)
+		if confirmErr != nil {
+			// The confirmation helper only returns an error for an explicit
+			// interrupt and has already printed the friendly message.
+			return nil, "", ErrSilent
+		}
+		if confirmed {
+			return resolveCheckoutSelection(cfg, sf, gitDir, checkoutview.StackRow{
+				Number: stackNumber,
+				Type:   checkoutview.TypeRemote,
+			})
+		}
+	}
+
 	if len(rows) == 0 {
 		cfg.Infof("No stacks available to check out")
 		cfg.Printf("Create a stack with `%s` or check out a stack by number with `%s`",
@@ -668,14 +760,89 @@ func interactiveCheckout(cfg *config.Config, sf *stack.StackFile, gitDir string)
 // with the local stacks into the picker's rows. Any GitHub failure (stacks not
 // enabled for the repo, no auth, network error) gracefully degrades to a
 // local-only list.
-func gatherCheckoutRows(cfg *config.Config, sf *stack.StackFile) []checkoutview.StackRow {
+func gatherCheckoutRows(cfg *config.Config, sf *stack.StackFile) ([]checkoutview.StackRow, []github.RemoteStack) {
 	var remote []github.RemoteStack
 	if client, err := cfg.GitHubClient(); err == nil {
 		if stacks, err := client.ListStacks(); err == nil {
 			remote = stacks
 		}
 	}
-	return checkoutview.BuildRows(sf.Stacks, remote)
+	return checkoutview.BuildRows(sf.Stacks, remote), remote
+}
+
+// offerRemoteStackForBranch asks to check out the unique active remote stack
+// containing branch when the branch is not already associated with a local
+// stack. Every outcome except confirmation or Ctrl+C falls through to the
+// existing picker.
+func offerRemoteStackForBranch(cfg *config.Config, sf *stack.StackFile, remote []github.RemoteStack, branch string) (int, bool, error) {
+	if branch == "" || len(sf.FindAllStacksForBranch(branch)) > 0 {
+		return 0, false, nil
+	}
+
+	matches := matchingRemoteStacksForBranch(remote, branch)
+	if len(matches) != 1 {
+		return 0, false, nil
+	}
+
+	stackNumber := matches[0].Number
+	prompt := fmt.Sprintf("Found stack #%d that includes branch %q. Check out stack #%d?", stackNumber, branch, stackNumber)
+	confirmed, err := confirmRemoteStackCheckout(cfg, prompt)
+	if err != nil {
+		if errors.Is(err, errInterrupt) {
+			return 0, false, err
+		}
+		return 0, false, nil
+	}
+	if !confirmed {
+		return 0, false, nil
+	}
+	return stackNumber, true, nil
+}
+
+// matchingRemoteStacksForBranch returns picker-eligible remote stacks that
+// contain branch exactly once per stack. Empty and fully merged stacks are not
+// actionable and are omitted, matching the picker.
+func matchingRemoteStacksForBranch(remote []github.RemoteStack, branch string) []*github.RemoteStack {
+	var matches []*github.RemoteStack
+	for i := range remote {
+		rs := &remote[i]
+		if rs.Number <= 0 || len(rs.PRDetails) == 0 {
+			continue
+		}
+
+		containsBranch := false
+		hasUnmergedPR := false
+		for _, pr := range rs.PRDetails {
+			if pr.Head.Ref == branch {
+				containsBranch = true
+			}
+			if !pr.IsMerged() {
+				hasUnmergedPR = true
+			}
+		}
+		if containsBranch && hasUnmergedPR {
+			matches = append(matches, rs)
+		}
+	}
+	return matches
+}
+
+func confirmRemoteStackCheckout(cfg *config.Config, prompt string) (bool, error) {
+	var (
+		confirmed bool
+		err       error
+	)
+	if cfg.ConfirmFn != nil {
+		confirmed, err = cfg.ConfirmFn(prompt, true)
+	} else {
+		p := prompter.New(cfg.In, cfg.Out, cfg.Err)
+		confirmed, err = p.Confirm(prompt, true)
+	}
+	if isInterruptError(err) {
+		printInterrupt(cfg)
+		return false, errInterrupt
+	}
+	return confirmed, err
 }
 
 // resolveCheckoutSelection resolves a picker selection to a local stack and the
