@@ -55,6 +55,7 @@ type Ops interface {
 	IsAncestor(ancestor, descendant string) (bool, error)
 	RevParse(ref string) (string, error)
 	RevParseMulti(refs []string) ([]string, error)
+	ResolveRefs(refs []string) (map[string]string, error)
 	MergeBase(a, b string) (string, error)
 	MergeBaseForkPoint(ref, branch string) (string, error)
 	Log(ref string, maxCount int) ([]CommitInfo, error)
@@ -203,10 +204,16 @@ func (d *defaultOps) Push(remote string, branches []string, force, atomic bool) 
 		// dependence on push.default / upstream configuration and
 		// ensures correct lease values for branches whose tracking ref
 		// was missing before the preceding FetchBranches call.
-		for _, b := range branches {
-			trackingRef := fmt.Sprintf("refs/remotes/%s/%s", remote, b)
-			sha, err := run("rev-parse", "--verify", "--quiet", trackingRef)
-			if err == nil && sha != "" {
+		trackingRefs := make([]string, len(branches))
+		for i, b := range branches {
+			trackingRefs[i] = fmt.Sprintf("refs/remotes/%s/%s", remote, b)
+		}
+		tracked, err := d.ResolveRefs(trackingRefs)
+		if err != nil {
+			return err
+		}
+		for i, b := range branches {
+			if sha := tracked[trackingRefs[i]]; sha != "" {
 				// Tracking ref exists: lease against the known SHA.
 				args = append(args, fmt.Sprintf("--force-with-lease=refs/heads/%s:%s", b, sha))
 			} else {
@@ -431,6 +438,28 @@ func (d *defaultOps) RevParseMulti(refs []string) ([]string, error) {
 	shas := strings.Split(out, "\n")
 	if len(shas) != len(refs) {
 		return nil, fmt.Errorf("rev-parse returned %d SHAs for %d refs", len(shas), len(refs))
+	}
+	return shas, nil
+}
+
+func (d *defaultOps) ResolveRefs(refs []string) (map[string]string, error) {
+	shas := make(map[string]string, len(refs))
+	if len(refs) == 0 {
+		return shas, nil
+	}
+	out, err := run(append([]string{"for-each-ref", "--format=%(objectname) %(refname)"}, refs...)...)
+	if err != nil {
+		return nil, err
+	}
+	// A for-each-ref pattern also matches refs nested below it.
+	wanted := make(map[string]bool, len(refs))
+	for _, ref := range refs {
+		wanted[ref] = true
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if sha, ref, ok := strings.Cut(line, " "); ok && wanted[ref] {
+			shas[ref] = sha
+		}
 	}
 	return shas, nil
 }

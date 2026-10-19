@@ -1,6 +1,9 @@
 package git
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // MockOps is a test double for git operations.
 // Each field is an optional function that, when set, handles the corresponding
@@ -35,6 +38,7 @@ type MockOps struct {
 	IsAncestorFn             func(string, string) (bool, error)
 	RevParseFn               func(string) (string, error)
 	RevParseMultiFn          func([]string) ([]string, error)
+	ResolveRefsFn            func([]string) (map[string]string, error)
 	MergeBaseFn              func(string, string) (string, error)
 	MergeBaseForkPointFn     func(string, string) (string, error)
 	LogFn                    func(string, int) ([]CommitInfo, error)
@@ -261,6 +265,26 @@ func (m *MockOps) RevParse(ref string) (string, error) {
 		return m.RevParseFn(ref)
 	}
 	return "", nil
+}
+
+func (m *MockOps) ResolveRefs(refs []string) (map[string]string, error) {
+	if m.ResolveRefsFn != nil {
+		return m.ResolveRefsFn(refs)
+	}
+	// Default: resolve local branches through BranchExists and RevParse.
+	shas := make(map[string]string, len(refs))
+	for _, ref := range refs {
+		branch, ok := strings.CutPrefix(ref, "refs/heads/")
+		if !ok || !m.BranchExists(branch) {
+			continue
+		}
+		sha, err := m.RevParse(branch)
+		if err != nil {
+			return nil, err
+		}
+		shas[ref] = sha
+	}
+	return shas, nil
 }
 
 func (m *MockOps) RevParseMulti(refs []string) ([]string, error) {

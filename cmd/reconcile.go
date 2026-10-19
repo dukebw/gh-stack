@@ -323,6 +323,17 @@ func planReconcile(manifest reconcileManifest, dryRun bool, client github.Client
 		len(currentBranches) < len(desiredBranches) && stringSlicePrefix(currentBranches, desiredBranches) && !containsMergedPR(targetPRs)
 	plan.structural = plan.target != nil && !plan.exact && !plan.appendOnly
 
+	localRefs := make([]string, 0, len(plan.layers))
+	for i := range plan.layers {
+		if !isMergedPR(plan.layers[i].pr) {
+			localRefs = append(localRefs, "refs/heads/"+plan.layers[i].manifest.Branch)
+		}
+	}
+	localSHAs, err := git.ResolveRefs(localRefs)
+	if err != nil {
+		plan.addBlocker("local_ref", fmt.Sprintf("failed to resolve local layer branches: %v", err), "", 0)
+		localSHAs = map[string]string{}
+	}
 	activeCount := 0
 	for i := range plan.layers {
 		layer := &plan.layers[i]
@@ -330,14 +341,9 @@ func planReconcile(manifest reconcileManifest, dryRun bool, client github.Client
 			continue
 		}
 		activeCount++
-		if git.BranchExists(layer.manifest.Branch) {
-			sha, err := git.RevParse(layer.manifest.Branch)
-			if err != nil {
-				plan.addBlocker("local_ref", fmt.Sprintf("failed to resolve local branch %s: %v", layer.manifest.Branch, err), layer.manifest.Branch, prNumber(layer.pr))
-				continue
-			}
+		if sha, ok := localSHAs["refs/heads/"+layer.manifest.Branch]; ok {
 			layer.localSHA = sha
-		} else if !dryRun {
+		} else if err == nil && !dryRun {
 			plan.addBlocker("missing_local_branch", fmt.Sprintf("local branch %s does not exist", layer.manifest.Branch), layer.manifest.Branch, prNumber(layer.pr))
 		}
 	}

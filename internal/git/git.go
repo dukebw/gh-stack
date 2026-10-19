@@ -320,6 +320,12 @@ func RevParseMulti(refs []string) ([]string, error) {
 	return ops.RevParseMulti(refs)
 }
 
+// ResolveRefs resolves fully qualified refs in a single git invocation.
+// Refs that do not exist are absent from the returned ref→SHA map.
+func ResolveRefs(refs []string) (map[string]string, error) {
+	return ops.ResolveRefs(refs)
+}
+
 // RevParseMap resolves multiple refs and returns a ref→SHA map.
 func RevParseMap(refs []string) (map[string]string, error) {
 	shas, err := ops.RevParseMulti(refs)
