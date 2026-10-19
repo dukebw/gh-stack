@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"strings"
 
 	"github.com/cli/go-gh/v2/pkg/api"
 	graphql "github.com/cli/shurcooL-graphql"
@@ -145,29 +146,45 @@ func (c *Client) FindPRForBranch(branch string) (*PullRequest, error) {
 	}, nil
 }
 
-// FindPRForBranchAllStates finds the most recently created PR for a branch,
-// including closed and merged PRs.
-func (c *Client) FindPRForBranchAllStates(branch string) (*PullRequest, error) {
-	var query struct {
-		Repository struct {
-			PullRequests struct {
-				Nodes []PullRequest
-			} `graphql:"pullRequests(headRefName: $head, states: [OPEN, CLOSED, MERGED], first: 1, orderBy: {field: CREATED_AT, direction: DESC})"`
-		} `graphql:"repository(owner: $owner, name: $name)"`
-	}
+// findPRsBatchSize bounds how many branch lookups share one GraphQL request.
+// Each aliased lookup adds ~20 ms to a request that costs ~400 ms on its own.
+const findPRsBatchSize = 100
 
-	variables := map[string]interface{}{
-		"owner": graphql.String(c.owner),
-		"name":  graphql.String(c.repo),
-		"head":  graphql.String(branch),
+// FindPRsForBranchesAllStates finds the most recently created PR for each
+// branch, including closed and merged PRs. The result is aligned with
+// branches; an entry is nil when the branch has no PR.
+func (c *Client) FindPRsForBranchesAllStates(branches []string) ([]*PullRequest, error) {
+	prs := make([]*PullRequest, len(branches))
+	for start := 0; start < len(branches); start += findPRsBatchSize {
+		end := min(start+findPRsBatchSize, len(branches))
+		var q strings.Builder
+		q.WriteString("query FindPRsForBranchesAllStates($owner:String!,$name:String!")
+		for i := start; i < end; i++ {
+			fmt.Fprintf(&q, ",$h%d:String!", i)
+		}
+		q.WriteString("){repository(owner:$owner,name:$name){")
+		vars := map[string]interface{}{"owner": c.owner, "name": c.repo}
+		for i := start; i < end; i++ {
+			fmt.Fprintf(&q, "b%d:pullRequests(headRefName:$h%d,states:[OPEN,CLOSED,MERGED],first:1,orderBy:{field:CREATED_AT,direction:DESC}){nodes{...pr}} ", i, i)
+			vars[fmt.Sprintf("h%d", i)] = branches[i]
+		}
+		q.WriteString("}}fragment pr on PullRequest{id number state url title body headRefName headRefOid baseRefName isDraft merged mergeQueueEntry{id} autoMergeRequest{enabledAt}}")
+
+		var resp struct {
+			Repository map[string]struct {
+				Nodes []PullRequest `json:"nodes"`
+			} `json:"repository"`
+		}
+		if err := c.gql.Do(q.String(), vars, &resp); err != nil {
+			return nil, fmt.Errorf("querying PRs: %w", err)
+		}
+		for i := start; i < end; i++ {
+			if nodes := resp.Repository[fmt.Sprintf("b%d", i)].Nodes; len(nodes) > 0 {
+				prs[i] = &nodes[0]
+			}
+		}
 	}
-	if err := c.gql.Query("FindPRForBranchAllStates", &query, variables); err != nil {
-		return nil, fmt.Errorf("querying PRs: %w", err)
-	}
-	if len(query.Repository.PullRequests.Nodes) == 0 {
-		return nil, nil
-	}
-	return &query.Repository.PullRequests.Nodes[0], nil
+	return prs, nil
 }
 
 // CreatePR creates a new pull request.

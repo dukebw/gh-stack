@@ -236,12 +236,17 @@ func planReconcile(manifest reconcileManifest, dryRun bool, client github.Client
 	plan := &reconcilePlan{manifest: manifest, result: newReconcileResult(dryRun)}
 	plan.layers = make([]reconcileLayerPlan, len(manifest.Layers))
 	knownPRs := make(map[int]*github.PullRequest)
+	branches := make([]string, len(manifest.Layers))
 	for i, layer := range manifest.Layers {
-		pr, err := client.FindPRForBranchAllStates(layer.Branch)
-		if err != nil {
-			plan.addBlocker("api_error", fmt.Sprintf("failed to look up PR for %s: %v", layer.Branch, err), layer.Branch, 0)
-			return plan, ErrAPIFailure
-		}
+		branches[i] = layer.Branch
+	}
+	prs, err := client.FindPRsForBranchesAllStates(branches)
+	if err != nil {
+		plan.addBlocker("api_error", fmt.Sprintf("failed to look up PRs for %d layer branches: %v", len(branches), err), "", 0)
+		return plan, ErrAPIFailure
+	}
+	for i, layer := range manifest.Layers {
+		pr := prs[i]
 		plan.layers[i] = reconcileLayerPlan{manifest: layer, pr: pr}
 		if pr != nil {
 			knownPRs[pr.Number] = pr

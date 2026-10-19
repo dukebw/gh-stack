@@ -121,8 +121,12 @@ func (s *reconcileTestState) addStack(base string, prs ...*github.PullRequest) g
 
 func (s *reconcileTestState) client() *github.MockClient {
 	return &github.MockClient{
-		FindPRForBranchAllStatesFn: func(branch string) (*github.PullRequest, error) {
-			return s.prs[branch], nil
+		FindPRsForBranchesAllStatesFn: func(branches []string) ([]*github.PullRequest, error) {
+			prs := make([]*github.PullRequest, len(branches))
+			for i, branch := range branches {
+				prs[i] = s.prs[branch]
+			}
+			return prs, nil
 		},
 		FindPRByNumberFn: func(number int) (*github.PullRequest, error) {
 			for _, pr := range s.prs {

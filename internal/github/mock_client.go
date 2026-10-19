@@ -4,28 +4,28 @@ package github
 // Each field is an optional function that, when set, handles the corresponding
 // ClientOps method call. When nil, a reasonable default is returned.
 type MockClient struct {
-	FindPRForBranchFn          func(string) (*PullRequest, error)
-	FindPRForBranchAllStatesFn func(string) (*PullRequest, error)
-	FindPRByNumberFn           func(int) (*PullRequest, error)
-	FindPRDetailsForBranchFn   func(string) (*PRDetails, error)
-	CreatePRFn                 func(string, string, string, string, bool) (*PullRequest, error)
-	UpdatePRBaseFn             func(int, string) error
-	UpdatePRMetadataFn         func(int, string, string) error
-	ReopenPRFn                 func(int) error
-	ClosePRFn                  func(int) error
-	MarkPRReadyForReviewFn     func(string) error
-	DisableAutoMergeFn         func(string) error
-	ListStacksFn               func() ([]RemoteStack, error)
-	FindStackForPRFn           func(int) (*RemoteStack, error)
-	GetStackFn                 func(int) (*RemoteStack, error)
-	CreateStackFn              func([]int) (*RemoteStack, error)
-	AddToStackFn               func(int, []int) (*RemoteStack, error)
-	UnstackFn                  func(int) (*RemoteStack, bool, error)
-	RepoMergeConfigFn          func() (*RepoMergeConfig, error)
-	MergeStackAsyncFn          func(int, string, string) (*AsyncMergeResult, error)
-	GetAsyncMergeResultFn      func(int, string) (*AsyncMergeResult, error)
-	PRTitlesFn                 func([]int) (map[int]string, error)
-	BaseBranchUsesMergeQueueFn func(string) (bool, error)
+	FindPRForBranchFn             func(string) (*PullRequest, error)
+	FindPRsForBranchesAllStatesFn func([]string) ([]*PullRequest, error)
+	FindPRByNumberFn              func(int) (*PullRequest, error)
+	FindPRDetailsForBranchFn      func(string) (*PRDetails, error)
+	CreatePRFn                    func(string, string, string, string, bool) (*PullRequest, error)
+	UpdatePRBaseFn                func(int, string) error
+	UpdatePRMetadataFn            func(int, string, string) error
+	ReopenPRFn                    func(int) error
+	ClosePRFn                     func(int) error
+	MarkPRReadyForReviewFn        func(string) error
+	DisableAutoMergeFn            func(string) error
+	ListStacksFn                  func() ([]RemoteStack, error)
+	FindStackForPRFn              func(int) (*RemoteStack, error)
+	GetStackFn                    func(int) (*RemoteStack, error)
+	CreateStackFn                 func([]int) (*RemoteStack, error)
+	AddToStackFn                  func(int, []int) (*RemoteStack, error)
+	UnstackFn                     func(int) (*RemoteStack, bool, error)
+	RepoMergeConfigFn             func() (*RepoMergeConfig, error)
+	MergeStackAsyncFn             func(int, string, string) (*AsyncMergeResult, error)
+	GetAsyncMergeResultFn         func(int, string) (*AsyncMergeResult, error)
+	PRTitlesFn                    func([]int) (map[int]string, error)
+	BaseBranchUsesMergeQueueFn    func(string) (bool, error)
 }
 
 // Compile-time check that MockClient satisfies ClientOps.
@@ -38,11 +38,19 @@ func (m *MockClient) FindPRForBranch(branch string) (*PullRequest, error) {
 	return nil, nil
 }
 
-func (m *MockClient) FindPRForBranchAllStates(branch string) (*PullRequest, error) {
-	if m.FindPRForBranchAllStatesFn != nil {
-		return m.FindPRForBranchAllStatesFn(branch)
+func (m *MockClient) FindPRsForBranchesAllStates(branches []string) ([]*PullRequest, error) {
+	if m.FindPRsForBranchesAllStatesFn != nil {
+		return m.FindPRsForBranchesAllStatesFn(branches)
 	}
-	return m.FindPRForBranch(branch)
+	prs := make([]*PullRequest, len(branches))
+	for i, branch := range branches {
+		pr, err := m.FindPRForBranch(branch)
+		if err != nil {
+			return nil, err
+		}
+		prs[i] = pr
+	}
+	return prs, nil
 }
 
 func (m *MockClient) FindPRByNumber(number int) (*PullRequest, error) {
