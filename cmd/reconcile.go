@@ -106,6 +106,29 @@ type reconcilePlan struct {
 	structural bool
 	appendOnly bool
 	exact      bool
+	// remoteHeads, when set, returns the manifest branches' remote heads,
+	// listed while the plan was built.
+	remoteHeads func() (map[string]string, error)
+}
+
+// startListingRemoteHeads lists the manifest's branches on the remote in the
+// background, so the round trip overlaps planning.
+func startListingRemoteHeads(manifest reconcileManifest) func() (map[string]string, error) {
+	branches := make([]string, len(manifest.Layers))
+	for i, layer := range manifest.Layers {
+		branches[i] = layer.Branch
+	}
+	done := make(chan struct{})
+	var heads map[string]string
+	var err error
+	go func() {
+		defer close(done)
+		heads, err = git.RemoteBranchSHAs(manifest.Remote, branches)
+	}()
+	return func() (map[string]string, error) {
+		<-done
+		return heads, err
+	}
 }
 
 func ReconcileCmd(cfg *config.Config) *cobra.Command {
@@ -150,10 +173,15 @@ func runReconcile(cfg *config.Config, opts *reconcileOptions) error {
 	if err != nil {
 		return finishReconcile(cfg, opts, result, ErrAPIFailure, fmt.Sprintf("failed to create GitHub client: %v", err))
 	}
+	var remoteHeads func() (map[string]string, error)
+	if !opts.dryRun {
+		remoteHeads = startListingRemoteHeads(manifest)
+	}
 	plan, planErr := planReconcile(manifest, opts.dryRun, client)
 	if plan == nil {
 		return finishReconcile(cfg, opts, result, planErr, "failed to plan reconciliation")
 	}
+	plan.remoteHeads = remoteHeads
 	result = plan.result
 	if planErr != nil {
 		return finishReconcile(cfg, opts, result, planErr, "")
@@ -536,7 +564,13 @@ func applyReconcile(plan *reconcilePlan, client github.ClientOps) error {
 	if len(pushBranches) > 0 {
 		// Lease against the heads the remote reports now, and push only the
 		// branches whose head differs from the local layer.
-		remoteSHAs, err := git.RemoteBranchSHAs(plan.manifest.Remote, pushBranches)
+		listHeads := plan.remoteHeads
+		if listHeads == nil {
+			listHeads = func() (map[string]string, error) {
+				return git.RemoteBranchSHAs(plan.manifest.Remote, pushBranches)
+			}
+		}
+		remoteSHAs, err := listHeads()
 		if err != nil {
 			return failReconcile(plan, ErrSilent, "git_error", fmt.Sprintf("failed to list branches on %s: %v", plan.manifest.Remote, err), "", 0)
 		}
