@@ -160,20 +160,37 @@ func (d *defaultOps) FetchBranches(remote string, branches []string) error {
 	if err := runSilent(args...); err == nil {
 		return nil
 	}
-	// Fallback: one branch may be absent on the remote or deleted since
-	// the last fetch. Fetch individually so one missing branch doesn't
-	// block the rest, while still surfacing real fetch failures.
-	var fetchErr error
-	for _, rs := range refspecs {
-		err := runSilent("fetch", remote, rs)
-		if err == nil || isMissingRemoteRefError(err) {
-			continue
-		}
-		if fetchErr == nil {
-			fetchErr = fmt.Errorf("fetching from %s: %w", remote, err)
+	// Fallback: some branches are absent on the remote or deleted since the
+	// last fetch. List the ones that exist with one ls-remote and fetch just
+	// those, so missing branches cost no per-branch round trips while real
+	// fetch failures still surface.
+	heads := make([]string, len(branches))
+	for i, b := range branches {
+		heads[i] = "refs/heads/" + b
+	}
+	out, err := run(append([]string{"ls-remote", "--heads", remote}, heads...)...)
+	if err != nil {
+		return fmt.Errorf("listing branches on %s: %w", remote, err)
+	}
+	present := make(map[string]bool)
+	for _, line := range strings.Split(out, "\n") {
+		if _, ref, ok := strings.Cut(line, "\t"); ok {
+			present[ref] = true
 		}
 	}
-	return fetchErr
+	var existing []string
+	for i, head := range heads {
+		if present[head] {
+			existing = append(existing, refspecs[i])
+		}
+	}
+	if len(existing) == 0 {
+		return nil
+	}
+	if err := runSilent(append([]string{"fetch", remote}, existing...)...); err != nil {
+		return fmt.Errorf("fetching from %s: %w", remote, err)
+	}
+	return nil
 }
 
 func isMissingRemoteRefError(err error) bool {

@@ -361,6 +361,27 @@ func TestIntegration_Push_MixedStack(t *testing.T) {
 	assert.Equal(t, localB2, remoteBranchSHA(t, bareDir, "b2"))
 }
 
+// FetchBranches with a branch absent on the remote still refreshes the
+// tracking refs of the branches that exist.
+func TestIntegration_FetchBranches_SomeAbsentOnRemote(t *testing.T) {
+	bareDir, cloneDir := setupBareAndClone(t)
+	restore := withGitDir(t, cloneDir)
+	defer restore()
+
+	gitExec(t, cloneDir, "checkout", "-b", "b1")
+	writeFile(t, cloneDir, "b1.txt", "v1")
+	gitExec(t, cloneDir, "add", ".")
+	gitExec(t, cloneDir, "commit", "-m", "b1 initial")
+	gitExec(t, cloneDir, "push", "origin", "b1")
+	gitExec(t, cloneDir, "branch", "-dr", "origin/b1")
+
+	require.NoError(t, (&defaultOps{}).FetchBranches("origin", []string{"absent", "b1"}))
+
+	assert.Equal(t, remoteBranchSHA(t, bareDir, "b1"), gitExec(t, cloneDir, "rev-parse", "refs/remotes/origin/b1"))
+	_, err := gitExecMayFail(t, cloneDir, "rev-parse", "--verify", "refs/remotes/origin/absent")
+	assert.Error(t, err)
+}
+
 // A stack branch whose name begins with "+" must push its own ref, not a
 // similarly named sibling. A leading "+" in a git refspec means "force update",
 // so passing a bare "+feature" (or "+feature:...") lets git treat it as a
