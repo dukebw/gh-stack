@@ -411,41 +411,33 @@ func planReconcile(manifest reconcileManifest, dryRun bool, client github.Client
 var errReconcileMultipleStacks = errors.New("desired pull requests belong to multiple stacks")
 
 // findReconcileStack uses the stack membership returned with each PR, so it
-// needs one REST call for the matched stack instead of one per PR. That call
-// is made even when no PR is stacked: its 404 is how a repository without
-// stacked PRs is detected. When no layer has a PR, the stack-support probe
-// received on probed decides instead.
+// needs at most one REST call, for the matched stack, instead of one per PR.
+// When no PR is stacked, the stack-support probe received on probed decides
+// instead: its 404 is how a repository without stacked PRs is detected.
 func findReconcileStack(client github.ClientOps, layers []reconcileLayerPlan, probed <-chan error) (*github.RemoteStack, error) {
-	probePR, stackNumber := 0, 0
+	stackedPR, stackNumber := 0, 0
 	for i := range layers {
 		pr := layers[i].pr
-		if pr == nil {
-			continue
-		}
-		if probePR == 0 {
-			probePR = pr.Number
-		}
-		if pr.Stack == nil {
+		if pr == nil || pr.Stack == nil {
 			continue
 		}
 		if stackNumber == 0 {
-			probePR, stackNumber = pr.Number, pr.Stack.Number
+			stackedPR, stackNumber = pr.Number, pr.Stack.Number
 		} else if pr.Stack.Number != stackNumber {
 			return nil, errReconcileMultipleStacks
 		}
 	}
-	// The probe started before the PR lookups, so waiting costs nothing; a
-	// stacked or unstacked PR is checked with FindStackForPR instead.
+	// The probe started before the PR lookups, so waiting costs nothing.
 	probeErr := <-probed
-	if probePR == 0 {
+	if stackNumber == 0 {
 		return nil, probeErr
 	}
-	matched, err := client.FindStackForPR(probePR)
+	matched, err := client.FindStackForPR(stackedPR)
 	if err != nil {
 		return nil, err
 	}
-	if (matched == nil) != (stackNumber == 0) || (matched != nil && matched.Number != stackNumber) {
-		return nil, fmt.Errorf("stack lookup for PR #%d disagrees with its GraphQL stack #%d", probePR, stackNumber)
+	if matched == nil || matched.Number != stackNumber {
+		return nil, fmt.Errorf("stack lookup for PR #%d disagrees with its GraphQL stack #%d", stackedPR, stackNumber)
 	}
 	return matched, nil
 }
