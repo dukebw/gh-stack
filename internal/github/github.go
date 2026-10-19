@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/cli/go-gh/v2/pkg/api"
+	"github.com/cli/go-gh/v2/pkg/auth"
 	graphql "github.com/cli/shurcooL-graphql"
 )
 
@@ -78,7 +79,13 @@ func NewClient(host, owner, repo string) (*Client, error) {
 	if host == "" {
 		host = "github.com"
 	}
-	opts := api.ClientOptions{Host: host}
+	// Resolve the token once for both clients: with keyring storage each
+	// lookup runs `gh auth token`.
+	token, _ := auth.TokenForHost(host)
+	if token == "" {
+		return nil, fmt.Errorf("authentication token not found for host %s", host)
+	}
+	opts := api.ClientOptions{Host: host, AuthToken: token}
 	gql, err := api.NewGraphQLClient(opts)
 	if err != nil {
 		return nil, fmt.Errorf("creating GraphQL client: %w", err)
