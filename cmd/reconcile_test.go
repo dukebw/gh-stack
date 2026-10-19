@@ -528,6 +528,35 @@ func TestPlanReconcileFindsKnownStackWithoutRepositoryWideListing(t *testing.T) 
 	assert.Equal(t, stack.Number, plan.target.Number)
 }
 
+func TestApplyReconcilePushesOnlyLayersThatDifferFromRemote(t *testing.T) {
+	state := newReconcileTestState()
+	a := state.addPR(managedBranch("a"), "master", "OPEN")
+	b := state.addPR(managedBranch("b"), a.HeadRefName, "OPEN")
+	state.addStack("master", a, b)
+	local := map[string]string{a.HeadRefName: a.HeadRefOID, b.HeadRefName: "sha-amended"}
+	var pushed []string
+	restore := git.SetOps(&git.MockOps{
+		BranchExistsFn: func(branch string) bool { _, ok := local[branch]; return ok },
+		RevParseFn:     func(branch string) (string, error) { return local[branch], nil },
+		RemoteBranchSHAsFn: func(string, []string) (map[string]string, error) {
+			return map[string]string{a.HeadRefName: a.HeadRefOID, b.HeadRefName: b.HeadRefOID}, nil
+		},
+		PushExpectingFn: func(_ string, branches []string, expected map[string]string, _ bool) error {
+			pushed = branches
+			assert.Equal(t, b.HeadRefOID, expected[b.HeadRefName])
+			return nil
+		},
+	})
+	t.Cleanup(restore)
+	client := state.client()
+
+	plan, err := planReconcile(testManifest(a.HeadRefName, b.HeadRefName), false, client)
+	require.NoError(t, err)
+	require.NoError(t, applyReconcile(plan, client))
+
+	assert.Equal(t, []string{b.HeadRefName}, pushed)
+}
+
 func TestApplyReconcileAppendsToExactStackPrefix(t *testing.T) {
 	state := newReconcileTestState()
 	a := state.addPR(managedBranch("a"), "master", "OPEN")

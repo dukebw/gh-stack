@@ -240,6 +240,39 @@ func TestIntegration_Push_RemoteAdvancedByOther(t *testing.T) {
 	assert.NotEqual(t, otherSHA, finalRemoteSHA, "remote should have advanced past original other SHA")
 }
 
+// PushExpecting leases against heads listed by RemoteBranchSHAs, without
+// fetching them: a lease on a commit this clone has never seen still works,
+// and a stale lease is rejected.
+func TestIntegration_PushExpecting_LeasesAgainstListedRemoteHeads(t *testing.T) {
+	bareDir, cloneDir := setupBareAndClone(t)
+	restore := withGitDir(t, cloneDir)
+	defer restore()
+	d := &defaultOps{}
+
+	gitExec(t, cloneDir, "checkout", "-b", "b1")
+	writeFile(t, cloneDir, "b1.txt", "v1")
+	gitExec(t, cloneDir, "add", ".")
+	gitExec(t, cloneDir, "commit", "-m", "b1 initial")
+	gitExec(t, cloneDir, "push", "origin", "b1")
+	otherClone := filepath.Join(t.TempDir(), "other")
+	gitExec(t, ".", "clone", bareDir, otherClone)
+	gitExec(t, otherClone, "checkout", "b1")
+	writeFile(t, otherClone, "b1.txt", "v-other")
+	gitExec(t, otherClone, "commit", "-am", "other update")
+	gitExec(t, otherClone, "push", "origin", "b1")
+	writeFile(t, cloneDir, "b1.txt", "v-local")
+	gitExec(t, cloneDir, "commit", "-am", "b1 local update")
+
+	listed, err := d.RemoteBranchSHAs("origin", []string{"b1", "absent"})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"b1": remoteBranchSHA(t, bareDir, "b1")}, listed)
+
+	stale := map[string]string{"b1": gitExec(t, cloneDir, "rev-parse", "b1~1")}
+	require.Error(t, d.PushExpecting("origin", []string{"b1"}, stale, true))
+	require.NoError(t, d.PushExpecting("origin", []string{"b1"}, listed, true))
+	assert.Equal(t, gitExec(t, cloneDir, "rev-parse", "b1"), remoteBranchSHA(t, bareDir, "b1"))
+}
+
 // Test 4: Brand-new branch, absent on remote.
 // Push should create the branch via empty-expect lease.
 func TestIntegration_Push_NewBranchAbsentOnRemote(t *testing.T) {

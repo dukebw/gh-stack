@@ -198,6 +198,19 @@ func Push(remote string, branches []string, force, atomic bool) error {
 	return ops.Push(remote, branches, force, atomic)
 }
 
+// PushExpecting force-pushes branches, leasing each against expected[branch]
+// instead of its tracking ref. An empty or missing value means the branch
+// must not exist on the remote.
+func PushExpecting(remote string, branches []string, expected map[string]string, atomic bool) error {
+	return ops.PushExpecting(remote, branches, expected, atomic)
+}
+
+// RemoteBranchSHAs lists the remote heads of branches with one ls-remote.
+// Branches absent on the remote are absent from the returned map.
+func RemoteBranchSHAs(remote string, branches []string) (map[string]string, error) {
+	return ops.RemoteBranchSHAs(remote, branches)
+}
+
 // ResolveRemote determines the remote for pushing a branch. Checks git
 // config in priority order, falls back to listing remotes. Returns
 // *ErrMultipleRemotes if multiple remotes exist with no configured default.

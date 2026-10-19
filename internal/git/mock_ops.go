@@ -20,6 +20,8 @@ type MockOps struct {
 	DefaultBranchFn          func() (string, error)
 	CreateBranchFn           func(string, string) error
 	PushFn                   func(string, []string, bool, bool) error
+	PushExpectingFn          func(string, []string, map[string]string, bool) error
+	RemoteBranchSHAsFn       func(string, []string) (map[string]string, error)
 	ResolveRemoteFn          func(string) (string, error)
 	RebaseFn                 func(string, RebaseOpts) error
 	EnableRerereFn           func() error
@@ -146,6 +148,20 @@ func (m *MockOps) Push(remote string, branches []string, force, atomic bool) err
 		return m.PushFn(remote, branches, force, atomic)
 	}
 	return nil
+}
+
+func (m *MockOps) PushExpecting(remote string, branches []string, expected map[string]string, atomic bool) error {
+	if m.PushExpectingFn != nil {
+		return m.PushExpectingFn(remote, branches, expected, atomic)
+	}
+	return m.Push(remote, branches, true, atomic)
+}
+
+func (m *MockOps) RemoteBranchSHAs(remote string, branches []string) (map[string]string, error) {
+	if m.RemoteBranchSHAsFn != nil {
+		return m.RemoteBranchSHAsFn(remote, branches)
+	}
+	return map[string]string{}, nil
 }
 
 func (m *MockOps) ResolveRemote(branch string) (string, error) {

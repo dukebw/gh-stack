@@ -526,18 +526,31 @@ func applyReconcile(plan *reconcilePlan, client github.ClientOps) error {
 	}
 
 	pushBranches := make([]string, 0, len(plan.layers))
+	localSHAs := make(map[string]string, len(plan.layers))
 	for i := range plan.layers {
 		if isMergedPR(plan.layers[i].pr) || (plan.layers[i].pr != nil && plan.layers[i].pr.IsQueued()) {
 			continue
 		}
 		pushBranches = append(pushBranches, plan.layers[i].manifest.Branch)
+		localSHAs[plan.layers[i].manifest.Branch] = plan.layers[i].localSHA
 	}
 	if len(pushBranches) > 0 {
-		if err := git.FetchBranches(plan.manifest.Remote, pushBranches); err != nil {
-			return failReconcile(plan, ErrSilent, "git_error", fmt.Sprintf("failed to fetch branches from %s: %v", plan.manifest.Remote, err), "", 0)
+		// Lease against the heads the remote reports now, and push only the
+		// branches whose head differs from the local layer.
+		remoteSHAs, err := git.RemoteBranchSHAs(plan.manifest.Remote, pushBranches)
+		if err != nil {
+			return failReconcile(plan, ErrSilent, "git_error", fmt.Sprintf("failed to list branches on %s: %v", plan.manifest.Remote, err), "", 0)
 		}
-		if err := git.Push(plan.manifest.Remote, pushBranches, true, true); err != nil {
-			return failReconcile(plan, ErrSilent, "git_error", fmt.Sprintf("failed to push branches to %s: %v", plan.manifest.Remote, err), "", 0)
+		changed := make([]string, 0, len(pushBranches))
+		for _, branch := range pushBranches {
+			if remoteSHAs[branch] != localSHAs[branch] {
+				changed = append(changed, branch)
+			}
+		}
+		if len(changed) > 0 {
+			if err := git.PushExpecting(plan.manifest.Remote, changed, remoteSHAs, true); err != nil {
+				return failReconcile(plan, ErrSilent, "git_error", fmt.Sprintf("failed to push branches to %s: %v", plan.manifest.Remote, err), "", 0)
+			}
 		}
 	}
 

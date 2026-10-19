@@ -37,6 +37,8 @@ type Ops interface {
 	DefaultBranch() (string, error)
 	CreateBranch(name, base string) error
 	Push(remote string, branches []string, force, atomic bool) error
+	PushExpecting(remote string, branches []string, expected map[string]string, atomic bool) error
+	RemoteBranchSHAs(remote string, branches []string) (map[string]string, error)
 	ResolveRemote(branch string) (string, error)
 	Rebase(base string, opts RebaseOpts) error
 	EnableRerere() error
@@ -164,23 +166,13 @@ func (d *defaultOps) FetchBranches(remote string, branches []string) error {
 	// last fetch. List the ones that exist with one ls-remote and fetch just
 	// those, so missing branches cost no per-branch round trips while real
 	// fetch failures still surface.
-	heads := make([]string, len(branches))
-	for i, b := range branches {
-		heads[i] = "refs/heads/" + b
-	}
-	out, err := run(append([]string{"ls-remote", "--heads", remote}, heads...)...)
+	remoteSHAs, err := d.RemoteBranchSHAs(remote, branches)
 	if err != nil {
-		return fmt.Errorf("listing branches on %s: %w", remote, err)
-	}
-	present := make(map[string]bool)
-	for _, line := range strings.Split(out, "\n") {
-		if _, ref, ok := strings.Cut(line, "\t"); ok {
-			present[ref] = true
-		}
+		return err
 	}
 	var existing []string
-	for i, head := range heads {
-		if present[head] {
+	for i, b := range branches {
+		if remoteSHAs[b] != "" {
 			existing = append(existing, refspecs[i])
 		}
 	}
@@ -191,6 +183,30 @@ func (d *defaultOps) FetchBranches(remote string, branches []string) error {
 		return fmt.Errorf("fetching from %s: %w", remote, err)
 	}
 	return nil
+}
+
+func (d *defaultOps) RemoteBranchSHAs(remote string, branches []string) (map[string]string, error) {
+	shas := make(map[string]string, len(branches))
+	if len(branches) == 0 {
+		return shas, nil
+	}
+	heads := make(map[string]string, len(branches))
+	args := []string{"ls-remote", "--heads", remote}
+	for _, b := range branches {
+		heads["refs/heads/"+b] = b
+		args = append(args, "refs/heads/"+b)
+	}
+	out, err := run(args...)
+	if err != nil {
+		return nil, fmt.Errorf("listing branches on %s: %w", remote, err)
+	}
+	// ls-remote patterns match ref-name suffixes; keep exact matches only.
+	for _, line := range strings.Split(out, "\n") {
+		if sha, ref, ok := strings.Cut(line, "\t"); ok && heads[ref] != "" {
+			shas[heads[ref]] = sha
+		}
+	}
+	return shas, nil
 }
 
 func isMissingRemoteRefError(err error) bool {
@@ -215,29 +231,40 @@ func (d *defaultOps) CreateBranch(name, base string) error {
 }
 
 func (d *defaultOps) Push(remote string, branches []string, force, atomic bool) error {
+	if !force {
+		return d.push(remote, branches, false, nil, atomic)
+	}
+	// Lease each branch against its tracking ref, which the preceding
+	// FetchBranches call refreshed. A branch without one is absent on the
+	// remote (never pushed).
+	trackingRefs := make([]string, len(branches))
+	for i, b := range branches {
+		trackingRefs[i] = fmt.Sprintf("refs/remotes/%s/%s", remote, b)
+	}
+	tracked, err := d.ResolveRefs(trackingRefs)
+	if err != nil {
+		return err
+	}
+	expected := make(map[string]string, len(branches))
+	for i, b := range branches {
+		expected[b] = tracked[trackingRefs[i]]
+	}
+	return d.push(remote, branches, true, expected, atomic)
+}
+
+func (d *defaultOps) PushExpecting(remote string, branches []string, expected map[string]string, atomic bool) error {
+	return d.push(remote, branches, true, expected, atomic)
+}
+
+// push builds explicit per-branch leases and refspecs, which removes
+// dependence on push.default / upstream configuration. When force is set,
+// each branch is leased against expected[branch]; an empty value means the
+// branch must not exist on the remote.
+func (d *defaultOps) push(remote string, branches []string, force bool, expected map[string]string, atomic bool) error {
 	args := []string{"push", remote}
 	if force {
-		// Build explicit per-branch leases and refspecs. This removes
-		// dependence on push.default / upstream configuration and
-		// ensures correct lease values for branches whose tracking ref
-		// was missing before the preceding FetchBranches call.
-		trackingRefs := make([]string, len(branches))
-		for i, b := range branches {
-			trackingRefs[i] = fmt.Sprintf("refs/remotes/%s/%s", remote, b)
-		}
-		tracked, err := d.ResolveRefs(trackingRefs)
-		if err != nil {
-			return err
-		}
-		for i, b := range branches {
-			if sha := tracked[trackingRefs[i]]; sha != "" {
-				// Tracking ref exists: lease against the known SHA.
-				args = append(args, fmt.Sprintf("--force-with-lease=refs/heads/%s:%s", b, sha))
-			} else {
-				// No tracking ref: branch is absent on remote (never
-				// pushed). Empty expected value means "must not exist".
-				args = append(args, fmt.Sprintf("--force-with-lease=refs/heads/%s:", b))
-			}
+		for _, b := range branches {
+			args = append(args, fmt.Sprintf("--force-with-lease=refs/heads/%s:%s", b, expected[b]))
 		}
 	}
 	if atomic {
