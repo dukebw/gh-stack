@@ -481,7 +481,13 @@ published only after the Stack is complete.
 blocked plan without changing Git or GitHub. `--json` reserves stdout for the
 versioned result so external tools can consume it reliably. An empty manifest
 is always a no-op. External clients can verify compatibility with
-`gh stack reconcile --protocol-version`.
+`gh stack reconcile --protocol-version`, which prints the newest manifest
+version understood; results carry the version of the manifest they answer.
+
+A version 2 manifest may set `"assume_unmerged": true` when the caller built
+every layer branch as if no layer were merged. If a layer turns out to be
+merged, the plan reports a `merged_layer` blocker and changes nothing, so the
+caller can rebuild the layers without it and reconcile again.
 
 ### `gh stack merge`
 

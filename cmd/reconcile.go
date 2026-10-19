@@ -16,7 +16,9 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const reconcileProtocolVersion = 1
+// reconcileProtocolVersion is the newest manifest version understood; v2 adds
+// assume_unmerged. Results carry the version of the manifest they answer.
+const reconcileProtocolVersion = 2
 const reconcilePendingTitlePrefix = "[stack-pr pending] "
 
 var managedStackBranchPattern = regexp.MustCompile(`^[^/]+/stack/[0-9a-f]{32}$`)
@@ -33,6 +35,9 @@ type reconcileManifest struct {
 	Base    string                   `json:"base"`
 	Remote  string                   `json:"remote"`
 	Layers  []reconcileManifestLayer `json:"layers"`
+	// AssumeUnmerged says the caller materialized every layer as if none were
+	// merged, so a merged layer blocks the plan before anything changes.
+	AssumeUnmerged bool `json:"assume_unmerged,omitempty"`
 }
 
 type reconcileManifestLayer struct {
@@ -153,7 +158,7 @@ func ReconcileCmd(cfg *config.Config) *cobra.Command {
 }
 
 func runReconcile(cfg *config.Config, opts *reconcileOptions) error {
-	result := newReconcileResult(opts.dryRun)
+	result := newReconcileResult(reconcileProtocolVersion, opts.dryRun)
 	if opts.input == "" {
 		return finishReconcile(cfg, opts, result, ErrInvalidArgs, "--input is required")
 	}
@@ -165,6 +170,7 @@ func runReconcile(cfg *config.Config, opts *reconcileOptions) error {
 	if err := validateReconcileManifest(manifest); err != nil {
 		return finishReconcile(cfg, opts, result, ErrInvalidArgs, err.Error())
 	}
+	result.Version = manifest.Version
 	if len(manifest.Layers) == 0 {
 		return finishReconcile(cfg, opts, result, nil, "")
 	}
@@ -194,9 +200,9 @@ func runReconcile(cfg *config.Config, opts *reconcileOptions) error {
 	return finishReconcile(cfg, opts, plan.result, nil, "")
 }
 
-func newReconcileResult(dryRun bool) reconcileResult {
+func newReconcileResult(version int, dryRun bool) reconcileResult {
 	return reconcileResult{
-		Version:        reconcileProtocolVersion,
+		Version:        version,
 		DryRun:         dryRun,
 		Layers:         []reconcileLayerResult{},
 		RemovedManaged: []reconcileLayerResult{},
@@ -235,8 +241,11 @@ func loadReconcileManifest(stdin io.Reader, path string) (reconcileManifest, err
 }
 
 func validateReconcileManifest(manifest reconcileManifest) error {
-	if manifest.Version != reconcileProtocolVersion {
-		return fmt.Errorf("unsupported manifest version %d; expected %d", manifest.Version, reconcileProtocolVersion)
+	if manifest.Version < 1 || manifest.Version > reconcileProtocolVersion {
+		return fmt.Errorf("unsupported manifest version %d; expected 1 to %d", manifest.Version, reconcileProtocolVersion)
+	}
+	if manifest.AssumeUnmerged && manifest.Version < 2 {
+		return fmt.Errorf("assume_unmerged requires manifest version 2")
 	}
 	if strings.TrimSpace(manifest.Base) == "" {
 		return fmt.Errorf("base is required")
@@ -261,7 +270,7 @@ func validateReconcileManifest(manifest reconcileManifest) error {
 }
 
 func planReconcile(manifest reconcileManifest, dryRun bool, client github.ClientOps) (*reconcilePlan, error) {
-	plan := &reconcilePlan{manifest: manifest, result: newReconcileResult(dryRun)}
+	plan := &reconcilePlan{manifest: manifest, result: newReconcileResult(manifest.Version, dryRun)}
 	plan.layers = make([]reconcileLayerPlan, len(manifest.Layers))
 	knownPRs := make(map[int]*github.PullRequest)
 	branches := make([]string, len(manifest.Layers))
@@ -398,6 +407,14 @@ func planReconcile(manifest reconcileManifest, dryRun bool, client github.Client
 		}
 		if layer.localSHA != "" && layer.pr.HeadRefOID != "" && layer.localSHA != layer.pr.HeadRefOID {
 			plan.addBlocker("queued_branch_change", fmt.Sprintf("queued PR #%d does not match local branch %s", layer.pr.Number, layer.manifest.Branch), layer.manifest.Branch, layer.pr.Number)
+		}
+	}
+
+	if manifest.AssumeUnmerged {
+		for i := range plan.layers {
+			if layer := &plan.layers[i]; isMergedPR(layer.pr) {
+				plan.addBlocker("merged_layer", fmt.Sprintf("layer %s was merged in PR #%d, but the manifest assumed no layer is merged", layer.manifest.Branch, layer.pr.Number), layer.manifest.Branch, layer.pr.Number)
+			}
 		}
 	}
 

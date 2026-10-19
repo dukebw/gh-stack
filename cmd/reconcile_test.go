@@ -36,7 +36,9 @@ func TestValidateReconcileManifest(t *testing.T) {
 		wantErr string
 	}{
 		{name: "valid", mutate: func(*reconcileManifest) {}},
-		{name: "version", mutate: func(m *reconcileManifest) { m.Version = 2 }, wantErr: "unsupported manifest version"},
+		{name: "version 2", mutate: func(m *reconcileManifest) { m.Version = 2; m.AssumeUnmerged = true }},
+		{name: "version", mutate: func(m *reconcileManifest) { m.Version = 3 }, wantErr: "unsupported manifest version"},
+		{name: "assume unmerged in v1", mutate: func(m *reconcileManifest) { m.AssumeUnmerged = true }, wantErr: "requires manifest version 2"},
 		{name: "base", mutate: func(m *reconcileManifest) { m.Base = "" }, wantErr: "base is required"},
 		{name: "remote", mutate: func(m *reconcileManifest) { m.Remote = "" }, wantErr: "remote is required"},
 		{name: "managed branch", mutate: func(m *reconcileManifest) { m.Layers[0].Branch = "feature" }, wantErr: "must match"},
@@ -67,7 +69,7 @@ func TestReconcileProtocolVersion(t *testing.T) {
 	require.NoError(t, cfg.Out.Close())
 	stdout, err := io.ReadAll(outR)
 	require.NoError(t, err)
-	assert.Equal(t, "1\n", string(stdout))
+	assert.Equal(t, "2\n", string(stdout))
 }
 
 type reconcileTestState struct {
@@ -585,6 +587,24 @@ func TestPlanReconcileReportsMergedWithoutMutation(t *testing.T) {
 	require.NoError(t, applyReconcile(plan, state.client()))
 	assert.Equal(t, "merged", plan.result.Layers[0].Status)
 	assert.Equal(t, "merged", plan.result.Layers[0].Action)
+	assert.Empty(t, state.calls)
+}
+
+func TestPlanReconcileAssumingUnmergedBlocksMergedLayer(t *testing.T) {
+	state := newReconcileTestState()
+	merged := state.addPR(managedBranch("a"), "master", "MERGED")
+	merged.Merged = true
+	open := managedBranch("b")
+	mockReconcileGit(t, map[string]string{merged.HeadRefName: "sha-replayed", open: "sha-b"}, &state.calls)
+	manifest := testManifest(merged.HeadRefName, open)
+	manifest.Version, manifest.AssumeUnmerged = 2, true
+
+	plan, err := planReconcile(manifest, false, state.client())
+
+	require.ErrorIs(t, err, ErrInvalidArgs)
+	assert.Equal(t, []string{"merged_layer"}, blockerCodes(plan.result.Blockers))
+	assert.Equal(t, 2, plan.result.Version)
+	assert.Equal(t, "merged", plan.result.Layers[0].Status)
 	assert.Empty(t, state.calls)
 }
 
