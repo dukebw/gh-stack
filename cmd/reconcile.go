@@ -268,6 +268,9 @@ func planReconcile(manifest reconcileManifest, dryRun bool, client github.Client
 	for i, layer := range manifest.Layers {
 		branches[i] = layer.Branch
 	}
+	// Probe stack support during the lookups rather than after them.
+	probed := make(chan error, 1)
+	go func() { probed <- client.ProbeStacks() }()
 	prs, err := client.FindPRsForBranchesAllStates(branches)
 	if err != nil {
 		plan.addBlocker("api_error", fmt.Sprintf("failed to look up PRs for %d layer branches: %v", len(branches), err), "", 0)
@@ -281,7 +284,7 @@ func planReconcile(manifest reconcileManifest, dryRun bool, client github.Client
 		}
 	}
 
-	target, err := findReconcileStack(client, plan.layers)
+	target, err := findReconcileStack(client, plan.layers, probed)
 	plan.target = target
 	if err != nil {
 		var httpErr *api.HTTPError
@@ -410,8 +413,9 @@ var errReconcileMultipleStacks = errors.New("desired pull requests belong to mul
 // findReconcileStack uses the stack membership returned with each PR, so it
 // needs one REST call for the matched stack instead of one per PR. That call
 // is made even when no PR is stacked: its 404 is how a repository without
-// stacked PRs is detected.
-func findReconcileStack(client github.ClientOps, layers []reconcileLayerPlan) (*github.RemoteStack, error) {
+// stacked PRs is detected. When no layer has a PR, the stack-support probe
+// received on probed decides instead.
+func findReconcileStack(client github.ClientOps, layers []reconcileLayerPlan, probed <-chan error) (*github.RemoteStack, error) {
 	probePR, stackNumber := 0, 0
 	for i := range layers {
 		pr := layers[i].pr
@@ -430,8 +434,11 @@ func findReconcileStack(client github.ClientOps, layers []reconcileLayerPlan) (*
 			return nil, errReconcileMultipleStacks
 		}
 	}
+	// The probe started before the PR lookups, so waiting costs nothing; a
+	// stacked or unstacked PR is checked with FindStackForPR instead.
+	probeErr := <-probed
 	if probePR == 0 {
-		return nil, client.ProbeStacks()
+		return nil, probeErr
 	}
 	matched, err := client.FindStackForPR(probePR)
 	if err != nil {
