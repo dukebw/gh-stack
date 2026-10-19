@@ -16,6 +16,7 @@ type ClientOps interface {
 	MarkPRReadyForReview(prID string) error
 	DisableAutoMerge(prID string) error
 	ListStacks() ([]RemoteStack, error)
+	ProbeStacks() error
 	FindStackForPR(prNumber int) (*RemoteStack, error)
 	GetStack(stackNumber int) (*RemoteStack, error)
 	CreateStack(prNumbers []int) (*RemoteStack, error)

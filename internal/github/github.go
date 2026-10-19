@@ -635,6 +635,13 @@ func (c *Client) ListStacks() ([]RemoteStack, error) {
 	return stacks, nil
 }
 
+// ProbeStacks checks that the repository supports stacked PRs by listing at
+// most one stack; a 404 response means it does not.
+func (c *Client) ProbeStacks() error {
+	var stacks []RemoteStack
+	return c.rest.Get(fmt.Sprintf("repos/%s/%s/stacks?per_page=1", c.owner, c.repo), &stacks)
+}
+
 // FindStackForPR returns the stack that contains the given pull request number,
 // using the list endpoint's server-side pull_request filter. Returns nil
 // (without error) when the PR is not part of any stack.

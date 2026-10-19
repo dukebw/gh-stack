@@ -403,8 +403,7 @@ func findReconcileStack(client github.ClientOps, layers []reconcileLayerPlan) (*
 		}
 	}
 	if probePR == 0 {
-		_, err := client.ListStacks()
-		return nil, err
+		return nil, client.ProbeStacks()
 	}
 	matched, err := client.FindStackForPR(probePR)
 	if err != nil {
