@@ -169,8 +169,9 @@ func (c *Client) FindPRForBranch(branch string) (*PullRequest, error) {
 // on its own, so small batches sent concurrently finish soonest; 8 in flight
 // covers a 120-layer stack in one round trip.
 const (
-	findPRsBatchSize   = 15
-	findPRsConcurrency = 8
+	findPRsBatchSize    = 15
+	findPRsMinBatchSize = 3
+	findPRsConcurrency  = 8
 )
 
 // FindPRsForBranchesAllStates finds the most recently created PR for each
@@ -178,12 +179,15 @@ const (
 // branches; an entry is nil when the branch has no PR.
 func (c *Client) FindPRsForBranchesAllStates(branches []string) ([]*PullRequest, error) {
 	prs := make([]*PullRequest, len(branches))
-	errs := make([]error, (len(branches)+findPRsBatchSize-1)/findPRsBatchSize)
+	// Spread smaller stacks across the concurrent requests, down to a few
+	// lookups each, below which another request saves nothing.
+	batchSize := max(findPRsMinBatchSize, min(findPRsBatchSize, (len(branches)+findPRsConcurrency-1)/findPRsConcurrency))
+	errs := make([]error, (len(branches)+batchSize-1)/batchSize)
 	var wg sync.WaitGroup
 	slots := make(chan struct{}, findPRsConcurrency)
 	for batch := range errs {
-		start := batch * findPRsBatchSize
-		end := min(start+findPRsBatchSize, len(branches))
+		start := batch * batchSize
+		end := min(start+batchSize, len(branches))
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
