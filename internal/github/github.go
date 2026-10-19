@@ -71,6 +71,8 @@ type Client struct {
 	owner string
 	repo  string
 	slug  string
+	// repoID caches the repository node ID that each CreatePR needs.
+	repoID string
 }
 
 // NewClient creates a new GitHub API client for the given repository.
@@ -381,6 +383,9 @@ func (c *Client) DisableAutoMerge(prID string) error {
 }
 
 func (c *Client) repositoryID() (string, error) {
+	if c.repoID != "" {
+		return c.repoID, nil
+	}
 	var query struct {
 		Repository struct {
 			ID string
@@ -396,7 +401,8 @@ func (c *Client) repositoryID() (string, error) {
 		return "", fmt.Errorf("fetching repository ID: %w", err)
 	}
 
-	return query.Repository.ID, nil
+	c.repoID = query.Repository.ID
+	return c.repoID, nil
 }
 
 // PRDetails holds enriched pull request data for display in the TUI.
