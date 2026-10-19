@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/cli/go-gh/v2/pkg/auth"
 	"github.com/cli/go-gh/v2/pkg/repository"
 	"github.com/cli/go-gh/v2/pkg/term"
 
@@ -186,9 +187,21 @@ func (c *Config) GitHubClient() (ghapi.ClientOps, error) {
 	if c.GitHubClientOverride != nil {
 		return c.GitHubClientOverride, nil
 	}
+	// Resolving a token can run `gh auth token`; overlap it with detecting
+	// the repository, which is almost always on the default host.
+	defaultHost, _ := auth.DefaultHost()
+	tokens := make(chan string, 1)
+	go func() {
+		token, _ := auth.TokenForHost(defaultHost)
+		tokens <- token
+	}()
 	repo, err := c.Repo()
 	if err != nil {
 		return nil, fmt.Errorf("determining repository: %w", err)
 	}
-	return ghapi.NewClient(repo.Host, repo.Owner, repo.Name)
+	token := <-tokens
+	if repo.Host != defaultHost {
+		token = ""
+	}
+	return ghapi.NewClient(repo.Host, repo.Owner, repo.Name, token)
 }

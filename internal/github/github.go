@@ -78,14 +78,16 @@ type Client struct {
 // NewClient creates a new GitHub API client for the given repository.
 // The host parameter specifies the GitHub hostname (e.g. "github.com" or a
 // GHES hostname like "github.mycompany.com"). If empty, it defaults to
-// "github.com".
-func NewClient(host, owner, repo string) (*Client, error) {
+// "github.com". An empty token is resolved for the host.
+func NewClient(host, owner, repo, token string) (*Client, error) {
 	if host == "" {
 		host = "github.com"
 	}
 	// Resolve the token once for both clients: with keyring storage each
 	// lookup runs `gh auth token`.
-	token, _ := auth.TokenForHost(host)
+	if token == "" {
+		token, _ = auth.TokenForHost(host)
+	}
 	if token == "" {
 		return nil, fmt.Errorf("authentication token not found for host %s", host)
 	}
