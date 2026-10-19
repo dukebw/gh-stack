@@ -107,6 +107,7 @@ func (s *reconcileTestState) addStack(base string, prs ...*github.PullRequest) g
 		Base:   github.RemoteStackBase{Ref: base},
 	}
 	for _, pr := range prs {
+		pr.Stack = &github.PullRequestStack{Number: stack.Number}
 		stack.PullRequests = append(stack.PullRequests, pr.Number)
 		stack.PRDetails = append(stack.PRDetails, github.RemoteStackPR{
 			Number: pr.Number,
@@ -117,6 +118,16 @@ func (s *reconcileTestState) addStack(base string, prs ...*github.PullRequest) g
 	}
 	s.stacks = append(s.stacks, stack)
 	return stack
+}
+
+func (s *reconcileTestState) setStack(numbers []int, stack *github.PullRequestStack) {
+	for _, number := range numbers {
+		for _, pr := range s.prs {
+			if pr.Number == number {
+				pr.Stack = stack
+			}
+		}
+	}
 }
 
 func (s *reconcileTestState) client() *github.MockClient {
@@ -224,6 +235,7 @@ func (s *reconcileTestState) client() *github.MockClient {
 			for i := range s.stacks {
 				if s.stacks[i].Number == number {
 					s.stacks[i].PullRequests = append(s.stacks[i].PullRequests, delta...)
+					s.setStack(delta, &github.PullRequestStack{Number: number})
 					return &s.stacks[i], nil
 				}
 			}
@@ -233,6 +245,7 @@ func (s *reconcileTestState) client() *github.MockClient {
 			s.calls = append(s.calls, fmt.Sprintf("unstack:%d", number))
 			for i := range s.stacks {
 				if s.stacks[i].Number == number {
+					s.setStack(s.stacks[i].PRNumbers(), nil)
 					s.stacks = append(s.stacks[:i], s.stacks[i+1:]...)
 					return nil, true, nil
 				}

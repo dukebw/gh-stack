@@ -40,6 +40,14 @@ type PullRequest struct {
 	Merged           bool              `graphql:"merged"`
 	MergeQueueEntry  *MergeQueueEntry  `graphql:"mergeQueueEntry"`
 	AutoMergeRequest *AutoMergeRequest `graphql:"autoMergeRequest"`
+	// Stack is the native stack containing the PR; only
+	// FindPRsForBranchesAllStates populates it.
+	Stack *PullRequestStack `graphql:"stack"`
+}
+
+// PullRequestStack identifies the native stack a pull request belongs to.
+type PullRequestStack struct {
+	Number int `graphql:"number"`
 }
 
 // IsQueued reports whether the pull request is currently in a merge queue.
@@ -168,7 +176,7 @@ func (c *Client) FindPRsForBranchesAllStates(branches []string) ([]*PullRequest,
 			fmt.Fprintf(&q, "b%d:pullRequests(headRefName:$h%d,states:[OPEN,CLOSED,MERGED],first:1,orderBy:{field:CREATED_AT,direction:DESC}){nodes{...pr}} ", i, i)
 			vars[fmt.Sprintf("h%d", i)] = branches[i]
 		}
-		q.WriteString("}}fragment pr on PullRequest{id number state url title body headRefName headRefOid baseRefName isDraft merged mergeQueueEntry{id} autoMergeRequest{enabledAt}}")
+		q.WriteString("}}fragment pr on PullRequest{id number state url title body headRefName headRefOid baseRefName isDraft merged mergeQueueEntry{id} autoMergeRequest{enabledAt} stack{number}}")
 
 		var resp struct {
 			Repository map[string]struct {
