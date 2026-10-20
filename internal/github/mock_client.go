@@ -10,10 +10,11 @@ type MockClient struct {
 	FindPRDetailsForBranchFn      func(string) (*PRDetails, error)
 	CreatePRFn                    func(string, string, string, string, bool) (*PullRequest, error)
 	UpdatePRBaseFn                func(int, string) error
-	UpdatePRMetadataFn            func(int, string, string) error
+	UpdatePRsMetadataFn           func([]PRMetadata) error
 	ReopenPRFn                    func(int) error
 	ClosePRFn                     func(int) error
 	MarkPRReadyForReviewFn        func(string) error
+	MarkPRsReadyForReviewFn       func([]*PullRequest) error
 	DisableAutoMergeFn            func(string) error
 	ListStacksFn                  func() ([]RemoteStack, error)
 	ProbeStacksFn                 func() error
@@ -82,9 +83,9 @@ func (m *MockClient) UpdatePRBase(number int, base string) error {
 	return nil
 }
 
-func (m *MockClient) UpdatePRMetadata(number int, title, body string) error {
-	if m.UpdatePRMetadataFn != nil {
-		return m.UpdatePRMetadataFn(number, title, body)
+func (m *MockClient) UpdatePRsMetadata(updates []PRMetadata) error {
+	if m.UpdatePRsMetadataFn != nil {
+		return m.UpdatePRsMetadataFn(updates)
 	}
 	return nil
 }
@@ -106,6 +107,19 @@ func (m *MockClient) ClosePR(number int) error {
 func (m *MockClient) MarkPRReadyForReview(prID string) error {
 	if m.MarkPRReadyForReviewFn != nil {
 		return m.MarkPRReadyForReviewFn(prID)
+	}
+	return nil
+}
+
+// MarkPRsReadyForReview defaults to MarkPRReadyForReview for each PR.
+func (m *MockClient) MarkPRsReadyForReview(prs []*PullRequest) error {
+	if m.MarkPRsReadyForReviewFn != nil {
+		return m.MarkPRsReadyForReviewFn(prs)
+	}
+	for _, pr := range prs {
+		if err := m.MarkPRReadyForReview(pr.ID); err != nil {
+			return &PRMutationError{Number: pr.Number, Err: err}
+		}
 	}
 	return nil
 }

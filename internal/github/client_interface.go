@@ -10,10 +10,11 @@ type ClientOps interface {
 	FindPRDetailsForBranch(branch string) (*PRDetails, error)
 	CreatePR(base, head, title, body string, draft bool) (*PullRequest, error)
 	UpdatePRBase(number int, base string) error
-	UpdatePRMetadata(number int, title, body string) error
+	UpdatePRsMetadata(updates []PRMetadata) error
 	ReopenPR(number int) error
 	ClosePR(number int) error
 	MarkPRReadyForReview(prID string) error
+	MarkPRsReadyForReview(prs []*PullRequest) error
 	DisableAutoMerge(prID string) error
 	ListStacks() ([]RemoteStack, error)
 	ProbeStacks() error

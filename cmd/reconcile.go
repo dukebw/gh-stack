@@ -711,24 +711,49 @@ func applyReconcile(plan *reconcilePlan, client github.ClientOps) error {
 		}
 	}
 
+	// Every pending PR is marked ready before any pending title is replaced,
+	// so after a failure each PR still to be marked ready keeps its title.
+	var ready []*github.PullRequest
 	for _, layer := range active {
 		pendingTitle := reconcilePendingTitlePrefix + layer.manifest.Title
 		if layer.pr.Title == pendingTitle && !layer.manifest.Draft && layer.pr.IsDraft {
-			if err := client.MarkPRReadyForReview(layer.pr.ID); err != nil {
-				return failReconcile(plan, ErrAPIFailure, "api_error", fmt.Sprintf("failed to mark PR #%d ready for review: %v", layer.pr.Number, err), layer.manifest.Branch, layer.pr.Number)
-			}
-			layer.pr.IsDraft = false
+			ready = append(ready, layer.pr)
 		}
-		if layer.pr.Title == layer.manifest.Title && layer.pr.Body == layer.manifest.Body {
-			continue
+	}
+	if err := client.MarkPRsReadyForReview(ready); err != nil {
+		return failPRMutation(plan, err, "failed to mark PR #%d ready for review: %v", "failed to mark PRs ready for review: %v")
+	}
+	for _, pr := range ready {
+		pr.IsDraft = false
+	}
+	var updates []github.PRMetadata
+	for _, layer := range active {
+		if layer.pr.Title != layer.manifest.Title || layer.pr.Body != layer.manifest.Body {
+			updates = append(updates, github.PRMetadata{ID: layer.pr.ID, Number: layer.pr.Number, Title: layer.manifest.Title, Body: layer.manifest.Body})
 		}
-		if err := client.UpdatePRMetadata(layer.pr.Number, layer.manifest.Title, layer.manifest.Body); err != nil {
-			return failReconcile(plan, ErrAPIFailure, "api_error", fmt.Sprintf("failed to synchronize metadata of PR #%d: %v", layer.pr.Number, err), layer.manifest.Branch, layer.pr.Number)
-		}
+	}
+	if err := client.UpdatePRsMetadata(updates); err != nil {
+		return failPRMutation(plan, err, "failed to synchronize metadata of PR #%d: %v", "failed to synchronize PR metadata: %v")
+	}
+	for _, layer := range active {
 		layer.pr.Title = layer.manifest.Title
 		layer.pr.Body = layer.manifest.Body
 	}
 	return nil
+}
+
+// failPRMutation blocks on a failed batch of PR mutations, naming the layer
+// of the PR that failed when it is known.
+func failPRMutation(plan *reconcilePlan, err error, prFormat, batchFormat string) error {
+	var prErr *github.PRMutationError
+	if errors.As(err, &prErr) {
+		for _, layer := range plan.activeLayers() {
+			if layer.pr != nil && layer.pr.Number == prErr.Number {
+				return failReconcile(plan, ErrAPIFailure, "api_error", fmt.Sprintf(prFormat, prErr.Number, prErr.Err), layer.manifest.Branch, prErr.Number)
+			}
+		}
+	}
+	return failReconcile(plan, ErrAPIFailure, "api_error", fmt.Sprintf(batchFormat, err), "", 0)
 }
 
 func failReconcile(plan *reconcilePlan, exitErr error, code, message, branch string, number int) error {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -301,17 +302,98 @@ func (c *Client) UpdatePRBase(number int, base string) error {
 }
 
 // UpdatePRMetadata updates the title and body of an existing pull request.
-func (c *Client) UpdatePRMetadata(number int, title, body string) error {
-	type updatePRRequest struct {
-		Title string `json:"title"`
-		Body  string `json:"body"`
+// prMutationBatchSize bounds the mutations sent in one GraphQL request.
+// GitHub runs them one after another, ~0.6 s per title update, and times a
+// request out after 10 s.
+const prMutationBatchSize = 6
+
+// PRMetadata is the title and body to set on a pull request.
+type PRMetadata struct {
+	ID     string
+	Number int
+	Title  string
+	Body   string
+}
+
+// PRMutationError reports the pull request whose mutation failed.
+type PRMutationError struct {
+	Number int
+	Err    error
+}
+
+func (e *PRMutationError) Error() string { return fmt.Sprintf("PR #%d: %v", e.Number, e.Err) }
+func (e *PRMutationError) Unwrap() error { return e.Err }
+
+// UpdatePRsMetadata sets the title and body of pull requests, several per
+// request. It stops at the first failed request; other mutations in that
+// request may have been applied.
+func (c *Client) UpdatePRsMetadata(updates []PRMetadata) error {
+	numbers := make([]int, len(updates))
+	for i, update := range updates {
+		numbers[i] = update.Number
 	}
-	payload, err := json.Marshal(updatePRRequest{Title: title, Body: body})
-	if err != nil {
-		return fmt.Errorf("marshaling request: %w", err)
+	return c.mutatePRs("UpdatePullRequest", "updatePullRequest", numbers, func(i int) interface{} {
+		return map[string]interface{}{"pullRequestId": updates[i].ID, "title": updates[i].Title, "body": updates[i].Body}
+	})
+}
+
+// MarkPRsReadyForReview converts draft pull requests to ready for review,
+// several per request, with the failure semantics of UpdatePRsMetadata.
+func (c *Client) MarkPRsReadyForReview(prs []*PullRequest) error {
+	numbers := make([]int, len(prs))
+	for i, pr := range prs {
+		numbers[i] = pr.Number
 	}
-	path := fmt.Sprintf("repos/%s/%s/pulls/%d", c.owner, c.repo, number)
-	return c.rest.Patch(path, bytes.NewReader(payload), nil)
+	return c.mutatePRs("MarkPullRequestReadyForReview", "markPullRequestReadyForReview", numbers, func(i int) interface{} {
+		return map[string]interface{}{"pullRequestId": prs[i].ID}
+	})
+}
+
+// mutatePRs sends one `field` mutation per pull request, aliased into
+// requests of up to prMutationBatchSize. A failed mutation is reported as a
+// PRMutationError for the earliest pull request GitHub names.
+func (c *Client) mutatePRs(inputType, field string, numbers []int, input func(int) interface{}) error {
+	for start := 0; start < len(numbers); start += prMutationBatchSize {
+		end := min(start+prMutationBatchSize, len(numbers))
+		var q strings.Builder
+		q.WriteString("mutation(")
+		vars := make(map[string]interface{}, end-start)
+		for i := start; i < end; i++ {
+			if i > start {
+				q.WriteString(",")
+			}
+			fmt.Fprintf(&q, "$i%d:%sInput!", i, inputType)
+			vars[fmt.Sprintf("i%d", i)] = input(i)
+		}
+		q.WriteString("){")
+		for i := start; i < end; i++ {
+			fmt.Fprintf(&q, "m%d:%s(input:$i%d){clientMutationId} ", i, field, i)
+		}
+		q.WriteString("}")
+		var resp map[string]interface{}
+		err := c.gql.Do(q.String(), vars, &resp)
+		if err == nil {
+			continue
+		}
+		var gqlErr *api.GraphQLError
+		if errors.As(err, &gqlErr) {
+			failed, message := end, ""
+			for _, item := range gqlErr.Errors {
+				if len(item.Path) == 0 {
+					continue
+				}
+				alias, _ := item.Path[0].(string)
+				if i, convErr := strconv.Atoi(strings.TrimPrefix(alias, "m")); convErr == nil && i >= start && i < failed {
+					failed, message = i, item.Message
+				}
+			}
+			if failed < end {
+				return &PRMutationError{Number: numbers[failed], Err: errors.New(message)}
+			}
+		}
+		return fmt.Errorf("%s for PRs %v: %w", field, numbers[start:end], err)
+	}
+	return nil
 }
 
 func (c *Client) ReopenPR(number int) error {

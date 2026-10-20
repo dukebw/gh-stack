@@ -14,15 +14,49 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestUpdatePRMetadata(t *testing.T) {
-	var request recordedRequest
-	client := testAsyncClient(t, http.StatusOK, `{}`, &request)
+func TestUpdatePRsMetadataBatchesAndNamesFailedPR(t *testing.T) {
+	type request struct {
+		Query     string                    `json:"query"`
+		Variables map[string]map[string]any `json:"variables"`
+	}
+	var requests []request
+	failSecond := false
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var req request
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		requests = append(requests, req)
+		response := `{"data":{}}`
+		if failSecond && len(requests) == 2 {
+			response = `{"data":{"m6":null,"m7":null},"errors":[{"message":"late","path":["m7"]},{"message":"locked","path":["m6"]}]}`
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(bytes.NewReader([]byte(response))),
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Request:    r,
+		}, nil
+	})
+	gql, err := api.NewGraphQLClient(api.ClientOptions{Host: "github.com", AuthToken: "x", Transport: transport})
+	require.NoError(t, err)
+	client := &Client{gql: gql, owner: "o", repo: "r"}
+	updates := make([]PRMetadata, prMutationBatchSize+2)
+	for i := range updates {
+		updates[i] = PRMetadata{ID: "PR_" + strconv.Itoa(i), Number: 100 + i, Title: "Exact title"}
+	}
 
-	require.NoError(t, client.UpdatePRMetadata(42, "Exact title", ""))
+	require.NoError(t, client.UpdatePRsMetadata(updates))
 
-	assert.Equal(t, http.MethodPatch, request.method)
-	assert.Equal(t, "/repos/o/r/pulls/42", request.path)
-	assert.JSONEq(t, `{"title":"Exact title","body":""}`, request.body)
+	require.Len(t, requests, 2)
+	assert.Len(t, requests[0].Variables, prMutationBatchSize)
+	assert.Equal(t, map[string]any{"pullRequestId": "PR_7", "title": "Exact title", "body": ""}, requests[1].Variables["i7"])
+	assert.Contains(t, requests[1].Query, "m7:updatePullRequest(input:$i7)")
+
+	requests, failSecond = nil, true
+	err = client.UpdatePRsMetadata(updates)
+	var prErr *PRMutationError
+	require.ErrorAs(t, err, &prErr)
+	assert.Equal(t, 106, prErr.Number)
+	assert.EqualError(t, prErr.Err, "locked")
 }
 
 func TestPRURL(t *testing.T) {

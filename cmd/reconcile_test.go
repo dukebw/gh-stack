@@ -178,12 +178,14 @@ func (s *reconcileTestState) client() *github.MockClient {
 			}
 			return nil
 		},
-		UpdatePRMetadataFn: func(number int, title, body string) error {
-			s.calls = append(s.calls, fmt.Sprintf("update_metadata:%d:%s:%s", number, title, body))
-			for _, pr := range s.prs {
-				if pr.Number == number {
-					pr.Title = title
-					pr.Body = body
+		UpdatePRsMetadataFn: func(updates []github.PRMetadata) error {
+			for _, update := range updates {
+				s.calls = append(s.calls, fmt.Sprintf("update_metadata:%d:%s:%s", update.Number, update.Title, update.Body))
+				for _, pr := range s.prs {
+					if pr.Number == update.Number {
+						pr.Title = update.Title
+						pr.Body = update.Body
+					}
 				}
 			}
 			return nil
