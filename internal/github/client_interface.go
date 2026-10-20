@@ -9,6 +9,7 @@ type ClientOps interface {
 	FindPRByNumber(number int) (*PullRequest, error)
 	FindPRDetailsForBranch(branch string) (*PRDetails, error)
 	CreatePR(base, head, title, body string, draft bool) (*PullRequest, error)
+	CreatePRs(specs []NewPR) ([]*PullRequest, error)
 	UpdatePRBase(number int, base string) error
 	UpdatePRsMetadata(updates []PRMetadata) error
 	ReopenPR(number int) error

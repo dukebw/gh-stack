@@ -14,31 +14,39 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestUpdatePRsMetadataBatchesAndNamesFailedPR(t *testing.T) {
-	type request struct {
-		Query     string                    `json:"query"`
-		Variables map[string]map[string]any `json:"variables"`
-	}
-	var requests []request
-	failSecond := false
+type graphQLRequest struct {
+	Query     string                    `json:"query"`
+	Variables map[string]map[string]any `json:"variables"`
+}
+
+// testGraphQLClient records each GraphQL request and answers the nth (from 1)
+// with respond(n).
+func testGraphQLClient(t *testing.T, respond func(n int) string) (*Client, *[]graphQLRequest) {
+	var requests []graphQLRequest
 	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		var req request
+		var req graphQLRequest
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
 		requests = append(requests, req)
-		response := `{"data":{}}`
-		if failSecond && len(requests) == 2 {
-			response = `{"data":{"m6":null,"m7":null},"errors":[{"message":"late","path":["m7"]},{"message":"locked","path":["m6"]}]}`
-		}
 		return &http.Response{
 			StatusCode: http.StatusOK,
-			Body:       io.NopCloser(bytes.NewReader([]byte(response))),
+			Body:       io.NopCloser(bytes.NewReader([]byte(respond(len(requests))))),
 			Header:     http.Header{"Content-Type": []string{"application/json"}},
 			Request:    r,
 		}, nil
 	})
 	gql, err := api.NewGraphQLClient(api.ClientOptions{Host: "github.com", AuthToken: "x", Transport: transport})
 	require.NoError(t, err)
-	client := &Client{gql: gql, owner: "o", repo: "r"}
+	return &Client{gql: gql, owner: "o", repo: "r", repoID: "R_1"}, &requests
+}
+
+func TestUpdatePRsMetadataBatchesAndNamesFailedPR(t *testing.T) {
+	failSecond := false
+	client, requests := testGraphQLClient(t, func(n int) string {
+		if failSecond && n == 2 {
+			return `{"data":{"m6":null,"m7":null},"errors":[{"message":"late","path":["m7"]},{"message":"locked","path":["m6"]}]}`
+		}
+		return `{"data":{}}`
+	})
 	updates := make([]PRMetadata, prMutationBatchSize+2)
 	for i := range updates {
 		updates[i] = PRMetadata{ID: "PR_" + strconv.Itoa(i), Number: 100 + i, Title: "Exact title"}
@@ -46,17 +54,36 @@ func TestUpdatePRsMetadataBatchesAndNamesFailedPR(t *testing.T) {
 
 	require.NoError(t, client.UpdatePRsMetadata(updates))
 
-	require.Len(t, requests, 2)
-	assert.Len(t, requests[0].Variables, prMutationBatchSize)
-	assert.Equal(t, map[string]any{"pullRequestId": "PR_7", "title": "Exact title", "body": ""}, requests[1].Variables["i7"])
-	assert.Contains(t, requests[1].Query, "m7:updatePullRequest(input:$i7)")
+	require.Len(t, *requests, 2)
+	assert.Len(t, (*requests)[0].Variables, prMutationBatchSize)
+	assert.Equal(t, map[string]any{"pullRequestId": "PR_7", "title": "Exact title", "body": ""}, (*requests)[1].Variables["i7"])
+	assert.Contains(t, (*requests)[1].Query, "m7:updatePullRequest(input:$i7)")
 
-	requests, failSecond = nil, true
-	err = client.UpdatePRsMetadata(updates)
-	var prErr *PRMutationError
-	require.ErrorAs(t, err, &prErr)
-	assert.Equal(t, 106, prErr.Number)
-	assert.EqualError(t, prErr.Err, "locked")
+	*requests, failSecond = nil, true
+	err := client.UpdatePRsMetadata(updates)
+	var mutationErr *MutationError
+	require.ErrorAs(t, err, &mutationErr)
+	assert.Equal(t, 6, mutationErr.Index)
+	assert.EqualError(t, mutationErr.Err, "locked")
+}
+
+func TestCreatePRsKeepsPRsCreatedBeforeAFailure(t *testing.T) {
+	client, requests := testGraphQLClient(t, func(int) string {
+		return `{"data":{"m0":{"pullRequest":{"id":"PR_a","number":7,"url":"u"}},"m1":null},"errors":[{"message":"no commits","path":["m1"]}]}`
+	})
+
+	prs, err := client.CreatePRs([]NewPR{{Base: "main", Head: "a", Title: "A", Draft: true}, {Base: "a", Head: "b", Title: "B", Body: "b body"}})
+
+	var mutationErr *MutationError
+	require.ErrorAs(t, err, &mutationErr)
+	assert.Equal(t, 1, mutationErr.Index)
+	require.Len(t, prs, 2)
+	require.NotNil(t, prs[0])
+	assert.Equal(t, 7, prs[0].Number)
+	assert.Equal(t, "PR_a", prs[0].ID)
+	assert.Nil(t, prs[1])
+	assert.Equal(t, map[string]any{"repositoryId": "R_1", "baseRefName": "main", "headRefName": "a", "title": "A", "draft": true}, (*requests)[0].Variables["i0"])
+	assert.Equal(t, "b body", (*requests)[0].Variables["i1"]["body"])
 }
 
 func TestPRURL(t *testing.T) {

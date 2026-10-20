@@ -302,10 +302,13 @@ func (c *Client) UpdatePRBase(number int, base string) error {
 }
 
 // UpdatePRMetadata updates the title and body of an existing pull request.
-// prMutationBatchSize bounds the mutations sent in one GraphQL request.
-// GitHub runs them one after another, ~0.6 s per title update, and times a
-// request out after 10 s.
-const prMutationBatchSize = 6
+// GitHub runs the mutations of one GraphQL request one after another and
+// times the request out after 10 s, so these bound each batch: a title update
+// takes ~0.6 s, and creating a PR ~1.1 s (up to ~1.8 s).
+const (
+	prMutationBatchSize = 6
+	prCreateBatchSize   = 4
+)
 
 // PRMetadata is the title and body to set on a pull request.
 type PRMetadata struct {
@@ -315,46 +318,78 @@ type PRMetadata struct {
 	Body   string
 }
 
-// PRMutationError reports the pull request whose mutation failed.
-type PRMutationError struct {
-	Number int
-	Err    error
+// MutationError reports the first failed mutation of a batch, by its index
+// in the caller's list.
+type MutationError struct {
+	Index int
+	Err   error
 }
 
-func (e *PRMutationError) Error() string { return fmt.Sprintf("PR #%d: %v", e.Number, e.Err) }
-func (e *PRMutationError) Unwrap() error { return e.Err }
+func (e *MutationError) Error() string { return fmt.Sprintf("mutation %d: %v", e.Index, e.Err) }
+func (e *MutationError) Unwrap() error { return e.Err }
+
+// NewPR describes a pull request for CreatePRs to open.
+type NewPR struct {
+	Base, Head, Title, Body string
+	Draft                   bool
+}
+
+// CreatePRs opens pull requests, several per request. The result is aligned
+// with specs; on failure, the PRs that were created are still returned.
+func (c *Client) CreatePRs(specs []NewPR) ([]*PullRequest, error) {
+	prs := make([]*PullRequest, len(specs))
+	if len(specs) == 0 {
+		return prs, nil
+	}
+	repoID, err := c.repositoryID()
+	if err != nil {
+		return prs, err
+	}
+	err = c.mutateBatched("CreatePullRequest", "createPullRequest", "pullRequest{id number url}", prCreateBatchSize, len(specs),
+		func(i int) interface{} {
+			input := map[string]interface{}{"repositoryId": repoID, "baseRefName": specs[i].Base, "headRefName": specs[i].Head, "title": specs[i].Title, "draft": specs[i].Draft}
+			if specs[i].Body != "" {
+				input["body"] = specs[i].Body
+			}
+			return input
+		},
+		func(i int, raw json.RawMessage) error {
+			var payload struct {
+				PullRequest *PullRequest `json:"pullRequest"`
+			}
+			if err := json.Unmarshal(raw, &payload); err != nil || payload.PullRequest == nil {
+				return fmt.Errorf("decoding created PR for %s: %v", specs[i].Head, err)
+			}
+			prs[i] = payload.PullRequest
+			return nil
+		})
+	return prs, err
+}
 
 // UpdatePRsMetadata sets the title and body of pull requests, several per
 // request. It stops at the first failed request; other mutations in that
 // request may have been applied.
 func (c *Client) UpdatePRsMetadata(updates []PRMetadata) error {
-	numbers := make([]int, len(updates))
-	for i, update := range updates {
-		numbers[i] = update.Number
-	}
-	return c.mutatePRs("UpdatePullRequest", "updatePullRequest", numbers, func(i int) interface{} {
+	return c.mutateBatched("UpdatePullRequest", "updatePullRequest", "clientMutationId", prMutationBatchSize, len(updates), func(i int) interface{} {
 		return map[string]interface{}{"pullRequestId": updates[i].ID, "title": updates[i].Title, "body": updates[i].Body}
-	})
+	}, nil)
 }
 
 // MarkPRsReadyForReview converts draft pull requests to ready for review,
 // several per request, with the failure semantics of UpdatePRsMetadata.
 func (c *Client) MarkPRsReadyForReview(prs []*PullRequest) error {
-	numbers := make([]int, len(prs))
-	for i, pr := range prs {
-		numbers[i] = pr.Number
-	}
-	return c.mutatePRs("MarkPullRequestReadyForReview", "markPullRequestReadyForReview", numbers, func(i int) interface{} {
+	return c.mutateBatched("MarkPullRequestReadyForReview", "markPullRequestReadyForReview", "clientMutationId", prMutationBatchSize, len(prs), func(i int) interface{} {
 		return map[string]interface{}{"pullRequestId": prs[i].ID}
-	})
+	}, nil)
 }
 
-// mutatePRs sends one `field` mutation per pull request, aliased into
-// requests of up to prMutationBatchSize. A failed mutation is reported as a
-// PRMutationError for the earliest pull request GitHub names.
-func (c *Client) mutatePRs(inputType, field string, numbers []int, input func(int) interface{}) error {
-	for start := 0; start < len(numbers); start += prMutationBatchSize {
-		end := min(start+prMutationBatchSize, len(numbers))
+// mutateBatched sends n `field` mutations, aliased into requests of up to
+// batchSize, passing each successful result's selection to decode when set.
+// A failed mutation is reported as a MutationError for the earliest one
+// GitHub names; results of the request it was in are still decoded.
+func (c *Client) mutateBatched(inputType, field, selection string, batchSize, n int, input func(int) interface{}, decode func(int, json.RawMessage) error) error {
+	for start := 0; start < n; start += batchSize {
+		end := min(start+batchSize, n)
 		var q strings.Builder
 		q.WriteString("mutation(")
 		vars := make(map[string]interface{}, end-start)
@@ -367,11 +402,20 @@ func (c *Client) mutatePRs(inputType, field string, numbers []int, input func(in
 		}
 		q.WriteString("){")
 		for i := start; i < end; i++ {
-			fmt.Fprintf(&q, "m%d:%s(input:$i%d){clientMutationId} ", i, field, i)
+			fmt.Fprintf(&q, "m%d:%s(input:$i%d){%s} ", i, field, i, selection)
 		}
 		q.WriteString("}")
-		var resp map[string]interface{}
+		var resp map[string]json.RawMessage
 		err := c.gql.Do(q.String(), vars, &resp)
+		if decode != nil {
+			for i := start; i < end; i++ {
+				if raw := resp[fmt.Sprintf("m%d", i)]; len(raw) > 0 && string(raw) != "null" {
+					if decodeErr := decode(i, raw); decodeErr != nil {
+						return &MutationError{Index: i, Err: decodeErr}
+					}
+				}
+			}
+		}
 		if err == nil {
 			continue
 		}
@@ -388,10 +432,10 @@ func (c *Client) mutatePRs(inputType, field string, numbers []int, input func(in
 				}
 			}
 			if failed < end {
-				return &PRMutationError{Number: numbers[failed], Err: errors.New(message)}
+				return &MutationError{Index: failed, Err: errors.New(message)}
 			}
 		}
-		return fmt.Errorf("%s for PRs %v: %w", field, numbers[start:end], err)
+		return fmt.Errorf("%s batch %d-%d: %w", field, start, end-1, err)
 	}
 	return nil
 }

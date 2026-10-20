@@ -651,6 +651,8 @@ func applyReconcile(plan *reconcilePlan, client github.ClientOps) error {
 	}
 
 	active := plan.activeLayers()
+	var newPRs []github.NewPR
+	var newLayers []*reconcileLayerPlan
 	for i, layer := range active {
 		base := plan.manifest.Base
 		if i > 0 {
@@ -661,18 +663,8 @@ func applyReconcile(plan *reconcilePlan, client github.ClientOps) error {
 			if !layer.manifest.Draft {
 				title = reconcilePendingTitlePrefix + title
 			}
-			pr, err := client.CreatePR(base, layer.manifest.Branch, title, layer.manifest.Body, true)
-			if err != nil {
-				return failReconcile(plan, ErrAPIFailure, "api_error", fmt.Sprintf("failed to create PR for %s: %v", layer.manifest.Branch, err), layer.manifest.Branch, 0)
-			}
-			pr.State = "OPEN"
-			pr.Title = title
-			pr.Body = layer.manifest.Body
-			pr.HeadRefName = layer.manifest.Branch
-			pr.HeadRefOID = layer.localSHA
-			pr.BaseRefName = base
-			pr.IsDraft = true
-			layer.pr = pr
+			newPRs = append(newPRs, github.NewPR{Base: base, Head: layer.manifest.Branch, Title: title, Body: layer.manifest.Body, Draft: true})
+			newLayers = append(newLayers, layer)
 			continue
 		}
 		if shouldRepairBase(plan, layer.pr) && layer.pr.BaseRefName != base {
@@ -681,6 +673,30 @@ func applyReconcile(plan *reconcilePlan, client github.ClientOps) error {
 			}
 			layer.pr.BaseRefName = base
 		}
+	}
+	// Every new PR's base branch is pushed already, so they can be created in
+	// batches after the base repairs.
+	created, err := client.CreatePRs(newPRs)
+	for i, pr := range created {
+		if pr == nil {
+			continue
+		}
+		pr.State = "OPEN"
+		pr.Title = newPRs[i].Title
+		pr.Body = newPRs[i].Body
+		pr.HeadRefName = newPRs[i].Head
+		pr.HeadRefOID = newLayers[i].localSHA
+		pr.BaseRefName = newPRs[i].Base
+		pr.IsDraft = true
+		newLayers[i].pr = pr
+	}
+	if err != nil {
+		var mutationErr *github.MutationError
+		if errors.As(err, &mutationErr) {
+			branch := newPRs[mutationErr.Index].Head
+			return failReconcile(plan, ErrAPIFailure, "api_error", fmt.Sprintf("failed to create PR for %s: %v", branch, mutationErr.Err), branch, 0)
+		}
+		return failReconcile(plan, ErrAPIFailure, "api_error", fmt.Sprintf("failed to create PRs: %v", err), "", 0)
 	}
 
 	prNumbers := make([]int, len(active))
@@ -721,19 +737,21 @@ func applyReconcile(plan *reconcilePlan, client github.ClientOps) error {
 		}
 	}
 	if err := client.MarkPRsReadyForReview(ready); err != nil {
-		return failPRMutation(plan, err, "failed to mark PR #%d ready for review: %v", "failed to mark PRs ready for review: %v")
+		return failPRMutation(plan, err, ready, "failed to mark PR #%d ready for review: %v", "failed to mark PRs ready for review: %v")
 	}
 	for _, pr := range ready {
 		pr.IsDraft = false
 	}
 	var updates []github.PRMetadata
+	var updated []*github.PullRequest
 	for _, layer := range active {
 		if layer.pr.Title != layer.manifest.Title || layer.pr.Body != layer.manifest.Body {
 			updates = append(updates, github.PRMetadata{ID: layer.pr.ID, Number: layer.pr.Number, Title: layer.manifest.Title, Body: layer.manifest.Body})
+			updated = append(updated, layer.pr)
 		}
 	}
 	if err := client.UpdatePRsMetadata(updates); err != nil {
-		return failPRMutation(plan, err, "failed to synchronize metadata of PR #%d: %v", "failed to synchronize PR metadata: %v")
+		return failPRMutation(plan, err, updated, "failed to synchronize metadata of PR #%d: %v", "failed to synchronize PR metadata: %v")
 	}
 	for _, layer := range active {
 		layer.pr.Title = layer.manifest.Title
@@ -744,12 +762,13 @@ func applyReconcile(plan *reconcilePlan, client github.ClientOps) error {
 
 // failPRMutation blocks on a failed batch of PR mutations, naming the layer
 // of the PR that failed when it is known.
-func failPRMutation(plan *reconcilePlan, err error, prFormat, batchFormat string) error {
-	var prErr *github.PRMutationError
-	if errors.As(err, &prErr) {
+func failPRMutation(plan *reconcilePlan, err error, prs []*github.PullRequest, prFormat, batchFormat string) error {
+	var mutationErr *github.MutationError
+	if errors.As(err, &mutationErr) {
+		pr := prs[mutationErr.Index]
 		for _, layer := range plan.activeLayers() {
-			if layer.pr != nil && layer.pr.Number == prErr.Number {
-				return failReconcile(plan, ErrAPIFailure, "api_error", fmt.Sprintf(prFormat, prErr.Number, prErr.Err), layer.manifest.Branch, prErr.Number)
+			if layer.pr == pr {
+				return failReconcile(plan, ErrAPIFailure, "api_error", fmt.Sprintf(prFormat, pr.Number, mutationErr.Err), layer.manifest.Branch, pr.Number)
 			}
 		}
 	}

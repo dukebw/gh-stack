@@ -9,6 +9,7 @@ type MockClient struct {
 	FindPRByNumberFn              func(int) (*PullRequest, error)
 	FindPRDetailsForBranchFn      func(string) (*PRDetails, error)
 	CreatePRFn                    func(string, string, string, string, bool) (*PullRequest, error)
+	CreatePRsFn                   func([]NewPR) ([]*PullRequest, error)
 	UpdatePRBaseFn                func(int, string) error
 	UpdatePRsMetadataFn           func([]PRMetadata) error
 	ReopenPRFn                    func(int) error
@@ -83,6 +84,22 @@ func (m *MockClient) UpdatePRBase(number int, base string) error {
 	return nil
 }
 
+// CreatePRs defaults to CreatePR for each spec.
+func (m *MockClient) CreatePRs(specs []NewPR) ([]*PullRequest, error) {
+	if m.CreatePRsFn != nil {
+		return m.CreatePRsFn(specs)
+	}
+	prs := make([]*PullRequest, len(specs))
+	for i, spec := range specs {
+		pr, err := m.CreatePR(spec.Base, spec.Head, spec.Title, spec.Body, spec.Draft)
+		if err != nil {
+			return prs, &MutationError{Index: i, Err: err}
+		}
+		prs[i] = pr
+	}
+	return prs, nil
+}
+
 func (m *MockClient) UpdatePRsMetadata(updates []PRMetadata) error {
 	if m.UpdatePRsMetadataFn != nil {
 		return m.UpdatePRsMetadataFn(updates)
@@ -116,9 +133,9 @@ func (m *MockClient) MarkPRsReadyForReview(prs []*PullRequest) error {
 	if m.MarkPRsReadyForReviewFn != nil {
 		return m.MarkPRsReadyForReviewFn(prs)
 	}
-	for _, pr := range prs {
+	for i, pr := range prs {
 		if err := m.MarkPRReadyForReview(pr.ID); err != nil {
-			return &PRMutationError{Number: pr.Number, Err: err}
+			return &MutationError{Index: i, Err: err}
 		}
 	}
 	return nil
