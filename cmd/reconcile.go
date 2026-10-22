@@ -323,8 +323,15 @@ func planReconcile(manifest reconcileManifest, dryRun bool, client github.Client
 			plan.addBlocker("stacks_unavailable", "stacked PRs are not enabled for this repository", "", 0)
 			return plan, ErrStacksUnavailable
 		}
-		if errors.Is(err, errReconcileMultipleStacks) {
-			plan.addBlocker("multiple_stacks", "desired pull requests belong to multiple stacks", "", 0)
+		var multiple *reconcileMultipleStacksError
+		if errors.As(err, &multiple) {
+			for i := range plan.layers {
+				if pr := plan.layers[i].pr; pr != nil && pr.Stack != nil {
+					plan.addBlocker("multiple_stacks", multiple.layerMessage(pr), plan.layers[i].manifest.Branch, pr.Number)
+				}
+			}
+			// Show every layer, so the blocked ones read in context.
+			plan.buildResult(nil)
 			return plan, ErrDisambiguate
 		}
 		plan.addBlocker("api_error", fmt.Sprintf("failed to discover native stack: %v", err), "", 0)
@@ -447,7 +454,39 @@ func planReconcile(manifest reconcileManifest, dryRun bool, client github.Client
 	return plan, nil
 }
 
-var errReconcileMultipleStacks = errors.New("desired pull requests belong to multiple stacks")
+// reconcileMultipleStacksError reports desired PRs that already belong to
+// different native stacks, which reconcile does not combine.
+type reconcileMultipleStacksError struct {
+	stacks []int         // stack numbers, in layer order
+	prs    map[int][]int // stack number -> its desired PR numbers
+}
+
+func (e *reconcileMultipleStacksError) Error() string {
+	parts := make([]string, len(e.stacks))
+	for i, number := range e.stacks {
+		parts[i] = e.describeStack(number)
+	}
+	return "desired pull requests belong to multiple stacks: " + strings.Join(parts, " and ")
+}
+
+// layerMessage explains the blocker on the layer of pr.
+func (e *reconcileMultipleStacksError) layerMessage(pr *github.PullRequest) string {
+	var others []string
+	for _, number := range e.stacks {
+		if number != pr.Stack.Number {
+			others = append(others, e.describeStack(number))
+		}
+	}
+	return fmt.Sprintf("PR #%d is in stack #%d, but other layers' PRs are in %s; stacks are not combined", pr.Number, pr.Stack.Number, strings.Join(others, " and "))
+}
+
+func (e *reconcileMultipleStacksError) describeStack(number int) string {
+	prs := make([]string, len(e.prs[number]))
+	for i, pr := range e.prs[number] {
+		prs[i] = fmt.Sprintf("#%d", pr)
+	}
+	return fmt.Sprintf("stack #%d (%s)", number, strings.Join(prs, ", "))
+}
 
 // findReconcileStack uses the stack membership returned with each PR, so it
 // needs at most one REST call, for the matched stack, instead of one per PR.
@@ -455,6 +494,7 @@ var errReconcileMultipleStacks = errors.New("desired pull requests belong to mul
 // instead: its 404 is how a repository without stacked PRs is detected.
 func findReconcileStack(client github.ClientOps, layers []reconcileLayerPlan, probed <-chan error) (*github.RemoteStack, error) {
 	stackedPR, stackNumber := 0, 0
+	multiple := &reconcileMultipleStacksError{prs: make(map[int][]int)}
 	for i := range layers {
 		pr := layers[i].pr
 		if pr == nil || pr.Stack == nil {
@@ -462,12 +502,17 @@ func findReconcileStack(client github.ClientOps, layers []reconcileLayerPlan, pr
 		}
 		if stackNumber == 0 {
 			stackedPR, stackNumber = pr.Number, pr.Stack.Number
-		} else if pr.Stack.Number != stackNumber {
-			return nil, errReconcileMultipleStacks
 		}
+		if _, seen := multiple.prs[pr.Stack.Number]; !seen {
+			multiple.stacks = append(multiple.stacks, pr.Stack.Number)
+		}
+		multiple.prs[pr.Stack.Number] = append(multiple.prs[pr.Stack.Number], pr.Number)
 	}
 	// The probe started before the PR lookups, so waiting costs nothing.
 	probeErr := <-probed
+	if len(multiple.stacks) > 1 {
+		return nil, multiple
+	}
 	if stackNumber == 0 {
 		return nil, probeErr
 	}

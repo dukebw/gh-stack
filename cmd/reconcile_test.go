@@ -538,9 +538,16 @@ func TestPlanReconcileBlocksDesiredPRsAcrossStacks(t *testing.T) {
 	state.addStack("master", b)
 	mockReconcileGit(t, map[string]string{a.HeadRefName: a.HeadRefOID, b.HeadRefName: b.HeadRefOID}, &state.calls)
 
-	plan, err := planReconcile(testManifest(a.HeadRefName, b.HeadRefName), false, state.client())
+	plan, err := planReconcile(testManifest(a.HeadRefName, b.HeadRefName, managedBranch("c")), false, state.client())
 	require.ErrorIs(t, err, ErrDisambiguate)
-	assert.Contains(t, blockerCodes(plan.result.Blockers), "multiple_stacks")
+	assert.Equal(t, []string{"multiple_stacks", "multiple_stacks"}, blockerCodes(plan.result.Blockers))
+	assert.Equal(t, a.HeadRefName, plan.result.Blockers[0].Branch)
+	assert.Equal(t, fmt.Sprintf("PR #%d is in stack #11, but other layers' PRs are in stack #12 (#%d); stacks are not combined", a.Number, b.Number), plan.result.Blockers[0].Message)
+	var actions []string
+	for _, layer := range plan.result.Layers {
+		actions = append(actions, layer.Action)
+	}
+	assert.Equal(t, []string{"blocked", "blocked", "create"}, actions)
 	assert.Empty(t, state.calls)
 }
 
