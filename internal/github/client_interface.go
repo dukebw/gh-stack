@@ -16,6 +16,7 @@ type ClientOps interface {
 	ClosePR(number int) error
 	MarkPRReadyForReview(prID string) error
 	MarkPRsReadyForReview(prs []*PullRequest) error
+	PublicationEventCounts(ids []string) (map[string]int, error)
 	DisableAutoMerge(prID string) error
 	ListStacks() ([]RemoteStack, error)
 	ProbeStacks() error

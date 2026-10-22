@@ -302,6 +302,41 @@ func (c *Client) UpdatePRBase(number int, base string) error {
 }
 
 // UpdatePRMetadata updates the title and body of an existing pull request.
+// PublicationEventCounts counts each pull request's ready-for-review and
+// convert-to-draft events, keyed by node ID. Counting them in the batched
+// PR lookup made it ~15 ms slower per PR, so only callers that need them pay.
+func (c *Client) PublicationEventCounts(ids []string) (map[string]int, error) {
+	const nodesLimit = 100
+	counts := make(map[string]int, len(ids))
+	for start := 0; start < len(ids); start += nodesLimit {
+		chunk := ids[start:min(start+nodesLimit, len(ids))]
+		var resp struct {
+			Nodes []*struct {
+				ID string `json:"id"`
+				// The filter applies to filteredCount; totalCount ignores it.
+				Events struct {
+					FilteredCount int `json:"filteredCount"`
+				} `json:"events"`
+			} `json:"nodes"`
+		}
+		query := "query($ids:[ID!]!){nodes(ids:$ids){... on PullRequest{id events:timelineItems(itemTypes:[READY_FOR_REVIEW_EVENT,CONVERT_TO_DRAFT_EVENT]){filteredCount}}}}"
+		if err := c.gql.Do(query, map[string]interface{}{"ids": chunk}, &resp); err != nil {
+			return nil, fmt.Errorf("counting publication events: %w", err)
+		}
+		for _, node := range resp.Nodes {
+			if node != nil {
+				counts[node.ID] = node.Events.FilteredCount
+			}
+		}
+	}
+	for _, id := range ids {
+		if _, ok := counts[id]; !ok {
+			return nil, fmt.Errorf("counting publication events: pull request %s not found", id)
+		}
+	}
+	return counts, nil
+}
+
 // GitHub runs the mutations of one GraphQL request one after another and
 // times the request out after 10 s, so these bound each batch: a title update
 // takes ~0.6 s, and creating a PR ~1.1 s (up to ~1.8 s).

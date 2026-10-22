@@ -79,10 +79,13 @@ type reconcileTestState struct {
 	nextStack    int
 	calls        []string
 	createdDraft []bool
+	// publicationEvents counts each PR's ready-for-review and
+	// convert-to-draft events by ID.
+	publicationEvents map[string]int
 }
 
 func newReconcileTestState() *reconcileTestState {
-	return &reconcileTestState{prs: make(map[string]*github.PullRequest), nextPR: 100, nextStack: 10}
+	return &reconcileTestState{prs: make(map[string]*github.PullRequest), nextPR: 100, nextStack: 10, publicationEvents: make(map[string]int)}
 }
 
 func (s *reconcileTestState) addPR(branch, base, state string) *github.PullRequest {
@@ -210,12 +213,20 @@ func (s *reconcileTestState) client() *github.MockClient {
 		},
 		MarkPRReadyForReviewFn: func(id string) error {
 			s.calls = append(s.calls, "ready:"+id)
+			s.publicationEvents[id]++
 			for _, pr := range s.prs {
 				if pr.ID == id {
 					pr.IsDraft = false
 				}
 			}
 			return nil
+		},
+		PublicationEventCountsFn: func(ids []string) (map[string]int, error) {
+			counts := make(map[string]int, len(ids))
+			for _, id := range ids {
+				counts[id] = s.publicationEvents[id]
+			}
+			return counts, nil
 		},
 		DisableAutoMergeFn: func(id string) error {
 			s.calls = append(s.calls, "disable_auto_merge:"+id)
@@ -329,9 +340,8 @@ func TestApplyReconcileInitialCreateAndIdempotentRerun(t *testing.T) {
 	assert.Contains(t, state.calls, "create_pr:"+branches[0])
 	assert.Contains(t, state.calls, "create_pr:"+branches[1])
 	assert.Contains(t, state.calls, "ready:PR_101")
-	assert.Contains(t, state.calls, "update_metadata:101:Layer 1:Body 1")
 	assert.NotContains(t, state.calls, "ready:PR_102")
-	assert.NotContains(t, state.calls, "update_metadata:102:")
+	assert.NotContains(t, strings.Join(state.calls, "\n"), "update_metadata:")
 	assert.Contains(t, state.calls, "create_stack:[101 102]")
 	require.NotNil(t, plan.result.Stack)
 	assert.Equal(t, "open", plan.result.Layers[0].Status)
@@ -386,8 +396,26 @@ func TestApplyReconcileResumesInterruptedReadyPublication(t *testing.T) {
 	state := newReconcileTestState()
 	branch := managedBranch("a")
 	pr := state.addPR(branch, "master", "OPEN")
+	pr.IsDraft, pr.Title, pr.Body = true, "Layer 1", "Body 1"
+	mockReconcileGit(t, map[string]string{branch: pr.HeadRefOID}, &state.calls)
+
+	plan, err := planReconcile(testManifest(branch), false, state.client())
+	require.NoError(t, err)
+	assert.Equal(t, "update", plan.result.Layers[0].Action)
+	require.NoError(t, applyReconcile(plan, state.client()))
+
+	assert.Contains(t, state.calls, "ready:"+pr.ID)
+	assert.NotContains(t, strings.Join(state.calls, "\n"), "update_metadata:")
+	assert.False(t, pr.IsDraft)
+}
+
+func TestApplyReconcileResumesPublicationWithLegacyPendingTitle(t *testing.T) {
+	state := newReconcileTestState()
+	branch := managedBranch("a")
+	pr := state.addPR(branch, "master", "OPEN")
 	pr.IsDraft = true
-	pr.Title = reconcilePendingTitlePrefix + "Layer 1"
+	// Earlier versions marked unpublished PRs with this title prefix.
+	pr.Title = "[stack-pr pending] Layer 1"
 	mockReconcileGit(t, map[string]string{branch: pr.HeadRefOID}, &state.calls)
 
 	plan, err := planReconcile(testManifest(branch), false, state.client())
@@ -406,6 +434,8 @@ func TestApplyReconcilePreservesExistingDraftStateWhileSyncingMetadata(t *testin
 	branch := managedBranch("a")
 	pr := state.addPR(branch, "master", "OPEN")
 	pr.IsDraft = true
+	// The user converted the published PR back to draft.
+	state.publicationEvents[pr.ID] = 2
 	pr.Title = "User-managed title"
 	pr.Body = "User-managed body"
 	mockReconcileGit(t, map[string]string{branch: pr.HeadRefOID}, &state.calls)

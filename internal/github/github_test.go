@@ -15,8 +15,8 @@ import (
 )
 
 type graphQLRequest struct {
-	Query     string                    `json:"query"`
-	Variables map[string]map[string]any `json:"variables"`
+	Query     string         `json:"query"`
+	Variables map[string]any `json:"variables"`
 }
 
 // testGraphQLClient records each GraphQL request and answers the nth (from 1)
@@ -67,6 +67,21 @@ func TestUpdatePRsMetadataBatchesAndNamesFailedPR(t *testing.T) {
 	assert.EqualError(t, mutationErr.Err, "locked")
 }
 
+func TestPublicationEventCountsRequiresEveryPR(t *testing.T) {
+	client, requests := testGraphQLClient(t, func(int) string {
+		return `{"data":{"nodes":[{"id":"PR_a","events":{"filteredCount":0}},{"id":"PR_b","events":{"filteredCount":2}},null]}}`
+	})
+
+	counts, err := client.PublicationEventCounts([]string{"PR_a", "PR_b"})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]int{"PR_a": 0, "PR_b": 2}, counts)
+	assert.Contains(t, (*requests)[0].Query, "READY_FOR_REVIEW_EVENT,CONVERT_TO_DRAFT_EVENT")
+
+	// A missing PR must not read as never published.
+	_, err = client.PublicationEventCounts([]string{"PR_a", "PR_gone"})
+	assert.ErrorContains(t, err, "PR_gone not found")
+}
+
 func TestCreatePRsKeepsPRsCreatedBeforeAFailure(t *testing.T) {
 	client, requests := testGraphQLClient(t, func(int) string {
 		return `{"data":{"m0":{"pullRequest":{"id":"PR_a","number":7,"url":"u"}},"m1":null},"errors":[{"message":"no commits","path":["m1"]}]}`
@@ -83,7 +98,7 @@ func TestCreatePRsKeepsPRsCreatedBeforeAFailure(t *testing.T) {
 	assert.Equal(t, "PR_a", prs[0].ID)
 	assert.Nil(t, prs[1])
 	assert.Equal(t, map[string]any{"repositoryId": "R_1", "baseRefName": "main", "headRefName": "a", "title": "A", "draft": true}, (*requests)[0].Variables["i0"])
-	assert.Equal(t, "b body", (*requests)[0].Variables["i1"]["body"])
+	assert.Equal(t, "b body", (*requests)[0].Variables["i1"].(map[string]any)["body"])
 }
 
 func TestPRURL(t *testing.T) {

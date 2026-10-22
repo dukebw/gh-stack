@@ -19,7 +19,6 @@ import (
 // reconcileProtocolVersion is the newest manifest version understood; v2 adds
 // assume_unmerged. Results carry the version of the manifest they answer.
 const reconcileProtocolVersion = 2
-const reconcilePendingTitlePrefix = "[stack-pr pending] "
 
 var managedStackBranchPattern = regexp.MustCompile(`^[^/]+/stack/[0-9a-f]{32}$`)
 
@@ -100,6 +99,8 @@ type reconcileLayerPlan struct {
 	manifest reconcileManifestLayer
 	pr       *github.PullRequest
 	localSHA string
+	// unpublished marks a draft PR known never to have been published.
+	unpublished bool
 }
 
 type reconcilePlan struct {
@@ -285,11 +286,32 @@ func planReconcile(manifest reconcileManifest, dryRun bool, client github.Client
 		plan.addBlocker("api_error", fmt.Sprintf("failed to look up PRs for %d layer branches: %v", len(branches), err), "", 0)
 		return plan, ErrAPIFailure
 	}
+	var draftIDs []string
 	for i, layer := range manifest.Layers {
 		pr := prs[i]
 		plan.layers[i] = reconcileLayerPlan{manifest: layer, pr: pr}
 		if pr != nil {
 			knownPRs[pr.Number] = pr
+			if pr.IsDraft && !layer.Draft && strings.EqualFold(pr.State, "OPEN") {
+				draftIDs = append(draftIDs, pr.ID)
+			}
+		}
+	}
+	// Publishing a PR, or a user converting it back to draft, leaves an event
+	// in its history; a draft without either was created by a reconcile that
+	// stopped before publishing it.
+	if len(draftIDs) > 0 {
+		counts, err := client.PublicationEventCounts(draftIDs)
+		if err != nil {
+			plan.addBlocker("api_error", fmt.Sprintf("failed to read the history of %d draft PRs: %v", len(draftIDs), err), "", 0)
+			return plan, ErrAPIFailure
+		}
+		for i := range plan.layers {
+			if pr := plan.layers[i].pr; pr != nil {
+				if count, ok := counts[pr.ID]; ok && count == 0 {
+					plan.layers[i].unpublished = true
+				}
+			}
 		}
 	}
 
@@ -486,7 +508,7 @@ func (p *reconcilePlan) buildResult(targetPRs []*github.PullRequest) {
 				action = "reorder"
 			} else if (p.target != nil && !targetNumbers[layer.pr.Number]) || layer.pr.BaseRefName != expectedActiveBase(p.layers, i, p.manifest.Base) ||
 				(layer.localSHA != "" && layer.pr.HeadRefOID != "" && layer.localSHA != layer.pr.HeadRefOID) ||
-				layer.pr.Title != layer.manifest.Title || layer.pr.Body != layer.manifest.Body {
+				layer.pr.Title != layer.manifest.Title || layer.pr.Body != layer.manifest.Body || awaitingPublication(layer) {
 				action = "update"
 			}
 		}
@@ -659,11 +681,7 @@ func applyReconcile(plan *reconcilePlan, client github.ClientOps) error {
 			base = active[i-1].manifest.Branch
 		}
 		if layer.pr == nil {
-			title := layer.manifest.Title
-			if !layer.manifest.Draft {
-				title = reconcilePendingTitlePrefix + title
-			}
-			newPRs = append(newPRs, github.NewPR{Base: base, Head: layer.manifest.Branch, Title: title, Body: layer.manifest.Body, Draft: true})
+			newPRs = append(newPRs, github.NewPR{Base: base, Head: layer.manifest.Branch, Title: layer.manifest.Title, Body: layer.manifest.Body, Draft: true})
 			newLayers = append(newLayers, layer)
 			continue
 		}
@@ -689,6 +707,7 @@ func applyReconcile(plan *reconcilePlan, client github.ClientOps) error {
 		pr.BaseRefName = newPRs[i].Base
 		pr.IsDraft = true
 		newLayers[i].pr = pr
+		newLayers[i].unpublished = true
 	}
 	if err != nil {
 		var mutationErr *github.MutationError
@@ -727,12 +746,9 @@ func applyReconcile(plan *reconcilePlan, client github.ClientOps) error {
 		}
 	}
 
-	// Every pending PR is marked ready before any pending title is replaced,
-	// so after a failure each PR still to be marked ready keeps its title.
 	var ready []*github.PullRequest
 	for _, layer := range active {
-		pendingTitle := reconcilePendingTitlePrefix + layer.manifest.Title
-		if layer.pr.Title == pendingTitle && !layer.manifest.Draft && layer.pr.IsDraft {
+		if awaitingPublication(layer) {
 			ready = append(ready, layer.pr)
 		}
 	}
@@ -758,6 +774,12 @@ func applyReconcile(plan *reconcilePlan, client github.ClientOps) error {
 		layer.pr.Body = layer.manifest.Body
 	}
 	return nil
+}
+
+// awaitingPublication reports a draft PR that reconcile created and has not
+// published yet, so a reconcile interrupted before publishing resumes.
+func awaitingPublication(layer *reconcileLayerPlan) bool {
+	return layer.unpublished && layer.pr.IsDraft && !layer.manifest.Draft
 }
 
 // failPRMutation blocks on a failed batch of PR mutations, naming the layer

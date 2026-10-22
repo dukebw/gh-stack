@@ -16,6 +16,7 @@ type MockClient struct {
 	ClosePRFn                     func(int) error
 	MarkPRReadyForReviewFn        func(string) error
 	MarkPRsReadyForReviewFn       func([]*PullRequest) error
+	PublicationEventCountsFn      func([]string) (map[string]int, error)
 	DisableAutoMergeFn            func(string) error
 	ListStacksFn                  func() ([]RemoteStack, error)
 	ProbeStacksFn                 func() error
@@ -139,6 +140,18 @@ func (m *MockClient) MarkPRsReadyForReview(prs []*PullRequest) error {
 		}
 	}
 	return nil
+}
+
+// PublicationEventCounts defaults to no events for every PR.
+func (m *MockClient) PublicationEventCounts(ids []string) (map[string]int, error) {
+	if m.PublicationEventCountsFn != nil {
+		return m.PublicationEventCountsFn(ids)
+	}
+	counts := make(map[string]int, len(ids))
+	for _, id := range ids {
+		counts[id] = 0
+	}
+	return counts, nil
 }
 
 func (m *MockClient) DisableAutoMerge(prID string) error {
